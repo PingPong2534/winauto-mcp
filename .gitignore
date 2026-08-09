@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+.location_cache.json
+@AutomationLog.txt
+
+# Excluded: reveals unreleased Nightfall Siege project source/structure
+docs/godot-editor-manual.md
+docs/godot_manual_shots/

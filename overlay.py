@@ -1,0 +1,110 @@
+"""A transparent, click-through, always-on-top window that outlines the
+currently attached target window and can highlight specific element rects.
+
+Runs its own Tk instance on a background thread; all state changes go
+through a thread-safe queue so callers never touch Tk objects directly.
+"""
+
+import queue
+import threading
+
+import tkinter as tk
+
+from window_manager import get_client_rect_screen, window_exists
+
+BORDER_COLOR = "#00FF66"
+HIGHLIGHT_COLOR = "#FF3355"
+
+
+class Overlay:
+    def __init__(self, poll_ms=150):
+        self._poll_ms = poll_ms
+        self._cmd_q = queue.Queue()
+        self._tracked_hwnd = None
+        self._highlights = []
+        self._ready = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+        self._ready.wait(timeout=3)
+
+    def _run(self):
+        self.root = tk.Tk()
+        self.root.overrideredirect(True)
+        self.root.attributes("-topmost", True)
+        self.root.attributes("-transparentcolor", "black")
+        self.root.config(bg="black")
+        self.canvas = tk.Canvas(self.root, bg="black", highlightthickness=0, bd=0)
+        self.canvas.pack(fill="both", expand=True)
+        self.root.withdraw()
+        self._ready.set()
+        self._tick()
+        self.root.mainloop()
+
+    def _tick(self):
+        try:
+            while True:
+                cmd, data = self._cmd_q.get_nowait()
+                if cmd == "track":
+                    self._tracked_hwnd = data
+                elif cmd == "untrack":
+                    self._tracked_hwnd = None
+                    self._highlights = []
+                    self.root.withdraw()
+                elif cmd == "highlights":
+                    self._highlights = data
+                elif cmd == "stop":
+                    self.root.quit()
+                    return
+        except queue.Empty:
+            pass
+
+        if self._tracked_hwnd is not None:
+            if window_exists(self._tracked_hwnd):
+                try:
+                    rect = get_client_rect_screen(self._tracked_hwnd)
+                    self._redraw(rect)
+                except Exception:
+                    pass
+            else:
+                self._tracked_hwnd = None
+                self.root.withdraw()
+
+        self.root.after(self._poll_ms, self._tick)
+
+    def _redraw(self, rect):
+        left, top, right, bottom = rect
+        width, height = right - left, bottom - top
+        if width <= 0 or height <= 0:
+            return
+        self.root.deiconify()
+        self.root.geometry(f"{width}x{height}+{left}+{top}")
+        self.canvas.config(width=width, height=height)
+        self.canvas.delete("all")
+        self.canvas.create_rectangle(1, 1, width - 1, height - 1, outline=BORDER_COLOR, width=3)
+        for hx1, hy1, hx2, hy2 in self._highlights:
+            self.canvas.create_rectangle(hx1, hy1, hx2, hy2, outline=HIGHLIGHT_COLOR, width=2)
+
+    # --- thread-safe public API ---
+
+    def track(self, hwnd):
+        self._cmd_q.put(("track", hwnd))
+
+    def untrack(self):
+        self._cmd_q.put(("untrack", None))
+
+    def set_highlights(self, rects):
+        """rects: list of (x1, y1, x2, y2) in the tracked window's client-relative space."""
+        self._cmd_q.put(("highlights", rects))
+
+    def stop(self):
+        self._cmd_q.put(("stop", None))
+
+
+_overlay = None
+
+
+def get_overlay():
+    global _overlay
+    if _overlay is None:
+        _overlay = Overlay()
+    return _overlay
