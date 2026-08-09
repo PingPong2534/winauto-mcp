@@ -90,6 +90,25 @@ Claude Code CLI:
 claude mcp add winauto -- F:\tools\winauto-mcp\.venv\Scripts\python.exe F:\tools\winauto-mcp\server.py
 ```
 
+Codex Desktop `C:\Users\<you>\.codex\config.toml`:
+
+```toml
+[mcp_servers.winauto]
+command = 'K:\winauto-mcp\.venv\Scripts\python.exe'
+args = ['K:\winauto-mcp\server.py']
+enabled = true
+startup_timeout_sec = 30
+```
+
+After saving the config, restart Codex Desktop or open a new task so the MCP
+server is loaded into the tool list. Verify the connection from a Codex task by
+searching for `winauto` tools or calling `list_windows`; a successful connection
+returns visible top-level windows with `hwnd`, `title`, and `process` fields.
+
+If `list_windows` is not available, the active Codex task did not load the MCP
+server yet. Recheck the path to `.venv\Scripts\python.exe`, make sure
+`server.py` imports cleanly, then restart Codex again.
+
 ## Known limitations (v0.1)
 
 - One attached window at a time.
@@ -128,3 +147,23 @@ claude mcp add winauto -- F:\tools\winauto-mcp\.venv\Scripts\python.exe F:\tools
   against Blender's tightly packed viewport header (`View Select Add
   Object`, items only ~15-20px apart). Use a small `margin` (5-10px) for
   dense menu/toolbar rows; the default (15) assumes moderate spacing.
+
+## Agent usage notes for ZiiDMS desktop testing
+
+When using this MCP from Codex/LLM sessions for ZiiDMS desktop UI testing, follow this sequence:
+
+1. Verify the MCP is actually exposed in the active session before falling back to ad-hoc Python calls. Search or inspect available tools for a namespace like `mcp__winauto`. A local folder at `K:\winauto-mcp` is not enough by itself; the client session must be restarted or configured so the MCP server is registered.
+2. Start with `list_windows`. If the target app is missing, launch the app first, wait for the top-level window, then run `list_windows` again. Do not infer failure from `Get-Process.MainWindowHandle = 0` alone; a visible attachable window may still appear in `list_windows`.
+3. Attach by HWND with `attach_window`, then immediately call `capture_screen`. Use the full returned image and UIA summary as the test baseline. Do not rely on cropped screenshots from a chat transcript to decide whether buttons are missing.
+4. Prefer `click_element(name)` for named buttons such as `Save`, `Delete Selected`, `Restore Selected`, `New Department`, and `Include Deleted`. For grid rows or custom-drawn cells, use coordinates from the full client-area image, or `locate_in_region` on a small candidate area; do not eyeball coordinates from resized display crops.
+5. For ZiiDMS launched through DmsEnv, the normal launcher may start through a hidden wrapper. If `list_windows` does not show `ZiiDMSNextGen Local`, cleanly stop the prior client PID and relaunch through the approved launcher path. If a temporary visible-wrapper workaround is used, restore the launcher file immediately after launch.
+6. Use `capture_screen` or `get_elements` after each action to verify command enabled/disabled state from UIA, especially for `Save`, `Delete Selected`, and `Restore Selected`. For visual-only state such as selected rows or deleted-row styling, use the full screenshot.
+7. If a click unexpectedly opens a discard/confirmation prompt, record that as behavior evidence before dismissing it. In ZiiDMS Departments testing, read-only/protected fields should not mark the detail dirty merely because typing was attempted.
+
+For the local ZiiDMS NextGen DMSEnv Departments screen, the common launch target is:
+
+```powershell
+& 'C:\Users\Ping\.dmsenv\repos\eziidms-nextgen-dmsenv-a59a578e\run-client.ps1' -BypassLogin -ApiServer 'https://localhost:7160' -OrganizationId 7000 -DealershipId 7001 -Screen DepartmentsView
+```
+
+After launch, attach to the `ZiiDMSNextGen Local` window from `list_windows` and capture the full client area before testing.
