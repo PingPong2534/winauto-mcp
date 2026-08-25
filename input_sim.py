@@ -113,6 +113,45 @@ def move_to(screen_x, screen_y):
     _send(_mouse_input(abs_x, abs_y, MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK))
 
 
+class _borrowed_cursor:
+    """Put the pointer back where the person left it once the action is done.
+
+    There is one real cursor and it is shared with whoever is at the keyboard,
+    so an automated click that abandons the pointer somewhere in the target
+    app leaves them to find it again. Restoring costs one extra move and makes
+    a run far less disruptive to sit through.
+
+    Not always wanted: anything that keeps following the pointer after the
+    click -- Blender's modal transform after G/R/S, a rubber-band selection
+    continued in a later step -- reads the restored position as the user's
+    intent. Those callers pass keep_cursor=True.
+    """
+
+    def __init__(self, keep_cursor: bool):
+        self.keep_cursor = keep_cursor
+        self.origin = None
+
+    def __enter__(self):
+        if not self.keep_cursor:
+            try:
+                self.origin = win32api.GetCursorPos()
+            except win32api.error:
+                self.origin = None
+        return self
+
+    def __exit__(self, *_exc):
+        if self.origin is None:
+            return False
+        # Let the app finish reacting to the button first: a mouse-move
+        # arriving in the same instant as the click can be read as a drag.
+        time.sleep(0.05)
+        try:
+            move_to(*self.origin)
+        except OSError:
+            pass
+        return False
+
+
 def click_screen(screen_x, screen_y, button="left", double=False):
     down_flag = MOUSEEVENTF_LEFTDOWN if button == "left" else MOUSEEVENTF_RIGHTDOWN
     up_flag = MOUSEEVENTF_LEFTUP if button == "left" else MOUSEEVENTF_RIGHTUP
@@ -128,7 +167,7 @@ def click_screen(screen_x, screen_y, button="left", double=False):
             time.sleep(0.05)
 
 
-def scroll_in_window(hwnd, client_x, client_y, clicks: int):
+def scroll_in_window(hwnd, client_x, client_y, clicks: int, keep_cursor: bool = False):
     """Scroll the mouse wheel at (client_x, client_y) in the window's client
     area. Positive `clicks` scrolls up/away from the user, negative scrolls
     down -- matches the sign convention of a physical wheel notch."""
@@ -137,13 +176,15 @@ def scroll_in_window(hwnd, client_x, client_y, clicks: int):
     bring_to_foreground(hwnd)
     time.sleep(0.05)
     screen_x, screen_y = win32gui.ClientToScreen(hwnd, (int(client_x), int(client_y)))
-    move_to(screen_x, screen_y)
-    time.sleep(0.03)
-    delta = (clicks * WHEEL_DELTA) & 0xFFFFFFFF  # mouseData is c_ulong; pack signed value
-    _send(_mouse_input(0, 0, MOUSEEVENTF_WHEEL, mouse_data=delta))
+    with _borrowed_cursor(keep_cursor):
+        move_to(screen_x, screen_y)
+        time.sleep(0.03)
+        delta = (clicks * WHEEL_DELTA) & 0xFFFFFFFF  # mouseData is c_ulong; pack signed value
+        _send(_mouse_input(0, 0, MOUSEEVENTF_WHEEL, mouse_data=delta))
 
 
-def drag_in_window(hwnd, x1, y1, x2, y2, button="left", steps: int = 12, step_delay: float = 0.02):
+def drag_in_window(hwnd, x1, y1, x2, y2, button="left", steps: int = 12, step_delay: float = 0.02,
+                   keep_cursor: bool = False):
     """Drag from (x1, y1) to (x2, y2), both client-relative. Presses the
     button down at the start point, moves through `steps` intermediate
     points (many apps -- including Godot -- only recognize a drag if they
@@ -159,21 +200,23 @@ def drag_in_window(hwnd, x1, y1, x2, y2, button="left", steps: int = 12, step_de
     sx1, sy1 = win32gui.ClientToScreen(hwnd, (int(x1), int(y1)))
     sx2, sy2 = win32gui.ClientToScreen(hwnd, (int(x2), int(y2)))
 
-    move_to(sx1, sy1)
-    time.sleep(0.03)
-    _send(_mouse_input(0, 0, down_flag))
-    time.sleep(0.03)
-    for i in range(1, steps + 1):
-        t = i / steps
-        move_to(int(sx1 + (sx2 - sx1) * t), int(sy1 + (sy2 - sy1) * t))
-        time.sleep(step_delay)
-    time.sleep(0.03)
-    _send(_mouse_input(0, 0, up_flag))
+    with _borrowed_cursor(keep_cursor):
+        move_to(sx1, sy1)
+        time.sleep(0.03)
+        _send(_mouse_input(0, 0, down_flag))
+        time.sleep(0.03)
+        for i in range(1, steps + 1):
+            t = i / steps
+            move_to(int(sx1 + (sx2 - sx1) * t), int(sy1 + (sy2 - sy1) * t))
+            time.sleep(step_delay)
+        time.sleep(0.03)
+        _send(_mouse_input(0, 0, up_flag))
 
 
-def click_in_window(hwnd, client_x, client_y, button="left", double=False, modifiers=None):
+def click_in_window(hwnd, client_x, client_y, button="left", double=False, modifiers=None,
+                    keep_cursor: bool = False):
     """Click at coordinates relative to the window's client area (same space
-    as the image returned by screenshot.capture_window_png). `modifiers`, if
+    as the image returned by screenshot.grab_window). `modifiers`, if
     given, is a list like ["ctrl"] or ["shift"] held down for the duration of
     the click -- e.g. for ctrl/shift-click multi-selection in a tree/list."""
     import win32gui
@@ -193,7 +236,8 @@ def click_in_window(hwnd, client_x, client_y, button="left", double=False, modif
         _send(_key_vk_input(vk, key_up=False))
         time.sleep(0.02)
     try:
-        click_screen(screen_x, screen_y, button=button, double=double)
+        with _borrowed_cursor(keep_cursor):
+            click_screen(screen_x, screen_y, button=button, double=double)
     finally:
         for vk in reversed(mod_vks):
             _send(_key_vk_input(vk, key_up=True))
