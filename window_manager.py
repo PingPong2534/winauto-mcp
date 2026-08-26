@@ -58,6 +58,20 @@ def get_process_name(hwnd):
         return "?"
 
 
+def get_pid(hwnd):
+    """The process owning the window. Stable for the window's lifetime, so it
+    is read once at attach rather than on every call that needs it."""
+    _, pid = win32process.GetWindowThreadProcessId(hwnd)
+    return pid
+
+
+def process_alive(pid):
+    """Whether a pid taken earlier still refers to a running process. Asked
+    before reading a heap, so that "the app exited" is reported as itself
+    rather than as whatever the heap tool says when it cannot attach."""
+    return psutil.pid_exists(pid)
+
+
 def get_client_size(hwnd):
     """Client area (width, height) in pixels -- used as part of the location
     cache key, since a resized window invalidates cached coordinates."""

@@ -38,10 +38,13 @@ import contextlib
 import functools
 import inspect
 import json
+import os
+import tempfile
 import time
 
 from mcp.server.mcpserver import Image, MCPServer
 
+import heap
 import input_guard
 import input_sim
 import journal
@@ -146,6 +149,15 @@ mcp = MCPServer(
 
 _state = {
     "hwnd": None,
+    # Process owning the attached window, read once at attach. Only the heap
+    # tools need it, and they need it after the window may already be gone --
+    # a snapshot taken to see what a closed screen left behind is exactly the
+    # case where the hwnd is the least reliable thing to ask.
+    "pid": None,
+    # Parsed gcdump summaries by label, for heap_diff. The .gcdump files
+    # themselves stay on disk in the journal session folder; only the per-type
+    # counts are held here, which is all a comparison needs.
+    "heap": {},
     "last_snapshot": None,
     # What the caller has actually looked at, newest last: one entry per view
     # with the rect it covered and the frame as it was at that moment. click()
@@ -542,7 +554,12 @@ def attach_window(hwnd: int, take_control: bool = False) -> str:
     if not window_manager.window_exists(hwnd):
         raise ValueError(f"no such window: {hwnd}")
     _state["hwnd"] = hwnd
+    _state["pid"] = window_manager.get_pid(hwnd)
     _state["seen"] = []
+    # Heap snapshots describe one process. Keeping them across an attach would
+    # let heap_diff compare two different programs and report the difference
+    # between them as growth.
+    _state["heap"] = {}
     if take_control:
         window_manager.bring_to_foreground(hwnd)  # the hook draws the outline
     title = window_manager.get_window_title(hwnd)
@@ -1606,6 +1623,91 @@ def recall_location(label: str, margin: int = 15, threshold: int = 30) -> str:
     return json.dumps(
         {"cache_hit": True, "bbox": [bx1, by1, bx2, by2], "center": [round(new_cx), round(new_cy)]}
     )
+
+
+def _require_pid() -> int:
+    pid = _state["pid"]
+    if pid is None:
+        raise ValueError("no window attached -- call attach_window first")
+    if not window_manager.process_alive(pid):
+        raise ValueError(
+            f"the attached window's process (pid {pid}) has exited -- "
+            "there is no heap left to read"
+        )
+    return pid
+
+
+def _heap_file(label: str) -> str:
+    safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in label)[:40] or "snapshot"
+    folder = journal.session_dir() or tempfile.gettempdir()
+    return os.path.join(folder, f"heap_{safe}.gcdump")
+
+
+@tool
+def heap_snapshot(label: str) -> str:
+    """Count the live objects on the attached .NET process's managed heap, and
+    remember them under `label` for heap_diff. .NET only (WinForms, WPF,
+    WinUI/Uno) -- there is no managed heap in a native app to read.
+
+    This forces a full blocking garbage collection and counts only what
+    SURVIVED it, so a type still here afterwards is genuinely still referenced
+    by something. That is why this answers a leak question and the process's
+    memory size does not: .NET does not hand heap segments back to Windows when
+    objects die, so working-set can sit high with nothing leaking at all.
+
+    Take one before the action and one after. But do NOT read a single
+    before/after pair as a list of leaks -- measured on a process that was
+    doing nothing but sleeping, two snapshots differed by 4,217 objects across
+    255 types, because collecting a snapshot itself makes the runtime
+    materialize reflection metadata. The signal that survives that noise is a
+    count that keeps climbing across REPEATED cycles of the same action: run
+    the open/close 5+ times, snapshot each round, and look for the type whose
+    count goes up by the same amount every time."""
+    pid = _require_pid()
+    path = _heap_file(label)
+    heap.collect(pid, path)
+    parsed = heap.parse(heap.report(path))
+    _state["heap"][label] = parsed
+    return json.dumps(
+        {
+            "label": label,
+            "pid": pid,
+            "live_objects": parsed["total_objects"],
+            "heap_bytes": parsed["total_bytes"],
+            "distinct_types": len(parsed["types"]),
+            "dump_file": path,
+            "labels_held": sorted(_state["heap"]),
+        }
+    )
+
+
+@tool
+def heap_diff(before: str, after: str, top: int = 25) -> str:
+    """Types that gained instances between two heap_snapshot labels, biggest
+    gain first. Counts only -- the report's byte column is a per-object average
+    per size bucket, so byte totals derived from it do not add up to the heap
+    they describe; `approx_bytes_each` is offered to weigh a count and is not
+    summed.
+
+    Read `types_that_grew` before reading `grew`. Around 250 types growing is
+    what two snapshots of an IDLE process look like, so that number is the
+    noise floor of this measurement, not a finding. What is a finding: a type
+    you recognize -- your page, your view model, your record class -- appearing
+    here at all, and appearing again with a bigger delta every time the same
+    action is repeated."""
+    held = sorted(_state["heap"])
+    for name in (before, after):
+        if name not in _state["heap"]:
+            raise ValueError(
+                f'no heap snapshot labelled "{name}" -- '
+                f"held right now: {held or 'none'}"
+            )
+    result = heap.diff(_state["heap"][before], _state["heap"][after], top=top)
+    result["noise_floor_note"] = (
+        "~255 types / ~4,200 objects is the measured drift between two snapshots "
+        "of a process doing nothing. Trust repetition, not one pair."
+    )
+    return json.dumps(result)
 
 
 @tool
