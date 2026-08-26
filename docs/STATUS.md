@@ -5,10 +5,12 @@ finished behaviour lives in [SPEC.md](SPEC.md).
 
 ## Doing right now
 
-Idle. Nothing is running. The keyboard work below is **committed and pushed** on
-`screen-freshness-and-desktop-sharing`. The only file left dirty is
-`tests\probe_notepad_text.py`, a scratch script that proved UI Automation reads
-Notepad's text exactly; it was deliberately not committed.
+Idle. Nothing is running. The keyboard work below is **merged into `master`**
+(PR #2, merge commit `3e034f8`), which now holds all of the freshness,
+desktop-sharing, batching, region-capture and keyboard work for the first time.
+The only file left dirty is `tests\probe_notepad_text.py`, a scratch script that
+proved UI Automation reads Notepad's text exactly; it was deliberately not
+committed.
 
 ## Just finished
 
@@ -77,10 +79,6 @@ by 2.
 
 ## Waiting on the user
 
-- **Merge this branch?** `screen-freshness-and-desktop-sharing` is two commits
-  ahead of `master` and pushed, but no PR is open — open one, or merge to
-  `master` directly? `master` has never seen any of the freshness,
-  desktop-sharing, batching, region-capture or keyboard work.
 - **`F:\knowledge` commit decision**, still unanswered.
   `development/windows-background-capture-and-input.md` is written and
   cross-linked but uncommitted, because that repo's `README.md` diff also
@@ -92,8 +90,6 @@ by 2.
   with the observed junk addresses, the lease/panic-chord shape, and how to
   test a keyboard lock without locking the keyboard — so the doc is a further
   reason to resolve this, not a reason to wait.
-- **PR #1 "update doc of codex"** (branch `update_doc`, +39/−0) is open and
-  unreviewed — review the diff, or merge as-is?
 - Whether the diagnostics stay in the repo — `tests\diag_stability.py`,
   `tests\diag_typing.py`, `tests\diag_overlay_paint.py`,
   `tests\diag_attach_cost.py`, `tests\diag_keyboard_block.py` and the three
