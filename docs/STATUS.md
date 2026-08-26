@@ -5,12 +5,12 @@ finished behaviour lives in [SPEC.md](SPEC.md).
 
 ## Doing right now
 
-Idle. Branch `setup-and-howto-docs`, one commit ahead of the last push: the two
-heap tools below, with `SPEC.md` updated in the same commit. Nothing is running.
+Idle. Nothing is running.
 
-The doc work from earlier is committed (`5f38961` — `SETUP.md` and `HOWTOUSE.md`
-at the repo root); the working tree is clean apart from what that commit
-contains.
+Branch `setup-and-howto-docs` is **two commits ahead of `master`** and there is
+no PR open for it: `d049fd8` (the two heap tools, with `SPEC.md`) and this one
+(`SETUP.md` + `HOWTOUSE.md` brought up to 32 tools). Earlier doc work is already
+in at `5f38961`.
 
 **[PR #4](https://github.com/PingPong2534/winauto-mcp/pull/4) is merged**
 (`5a82791`, 2026-08-26): the foreground hand-back, `hover` and its pointer hold,
@@ -76,6 +76,21 @@ Result: `System.Uri +20,000` (56 bytes each) — ranked **#3 of 59 types that
 grew**, with the biggest noise entry at +674, so the signal sat 30× above it. It
 also asserts `attach_window` recorded the right pid, and kills the target.
 
+**`SETUP.md` and `HOWTOUSE.md` are no longer stale.** The count was not edited
+from 30 to 32 by hand — the stdio handshake in `SETUP.md` step 3.2 was re-run
+and returned `tools: 32`, naming `heap_snapshot` and `heap_diff`, and that is
+the number now in the file. `HOWTOUSE.md` gained full entries for both tools,
+a worked pattern that runs the open/close cycle **five times for six
+snapshots** and deliberately throws the first round away (first-open costs
+live there — template caches, static resources, JIT), and two new
+anti-patterns: calling a leak from one pair, and watching memory size to find a
+.NET leak. `SETUP.md` gained the `dotnet-gcdump` install as an **optional**
+extra — including the two things that actually went wrong here: the SDK is
+needed and not just the runtime, and the new terminal, since the tool lands in
+`%USERPROFILE%\.dotnet\tools` and an open shell has a stale PATH. The count is
+32 either way; the heap tools register at startup and only look for gcdump when
+called.
+
 **Not done, and not asked for yet:** no run against the real Uno application —
 none was running this session. `dotnet-dump` (for SOS `gcroot`, i.e. *why* a
 surviving object is still referenced) is not installed; that is the natural next
@@ -83,11 +98,6 @@ tool once a leaking type has a name.
 
 ## Waiting on the user
 
-- **`SETUP.md` and `HOWTOUSE.md` now say "30 tools" and are stale at 32.**
-  `SETUP.md`'s figure came from a real stdio handshake (`tools: 30`), and
-  `HOWTOUSE.md` documents all 30 individually — so fixing this means re-running
-  the handshake and writing two entries, not editing a number. Left for a
-  separate commit rather than smuggled into this one.
 - **`smoke.py` has never run against what is now on `master`.** It was 109/109
   at the first of the three merged commits and has not been run since, because
   it launches Notepad (below).

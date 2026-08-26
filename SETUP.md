@@ -83,6 +83,26 @@ writing:
 **Not needed**: Node.js, uv/uvx, Docker, Visual Studio Build Tools — `pywin32`
 ships prebuilt wheels, so nothing is compiled.
 
+**Optional, for the two heap tools only.** `heap_snapshot` and `heap_diff` read
+the object counts of a **.NET** application (WinForms, WPF, WinUI/Uno) through
+`dotnet-gcdump`, which is a .NET SDK global tool rather than a Python package —
+so it is not in `requirements.txt` and the other 30 tools do not care whether it
+is there:
+
+```powershell
+dotnet tool install -g dotnet-gcdump
+```
+
+If that answers **`No .NET SDKs were found`**, only the .NET *runtime* is on the
+machine and the SDK has to come first (`winget install Microsoft.DotNet.SDK.9`).
+Watch for a UAC prompt during that install — it appears on the secure desktop
+and winget will sit there silently until it is answered. Then **open a new
+terminal**: the tool lands in `%USERPROFILE%\.dotnet\tools`, and a shell started
+before the install has a stale PATH.
+
+Without it, every other tool works normally and the two heap tools fail with
+the install command in their message.
+
 ---
 
 ## Step 1 — Get Python ready
@@ -192,10 +212,10 @@ Real output on the test machine:
 ```
 protocolVersion: 2024-11-05
 serverInfo: winauto-mcp
-tools: 30
+tools: 32
 ```
 
-**The line that matters is `tools: 30`.** If you get that number, the server
+**The line that matters is `tools: 32`.** If you get that number, the server
 runs, declares its full tool set, and is ready for a harness — anything that
 still does not work after this is purely a harness config problem.
 
@@ -369,7 +389,9 @@ enough, kill the harness process — Windows tears down every hook for you.
 ### The harness says there is no `list_windows` tool
 
 1. Run step [3.2](#32-speak-the-mcp-handshake-directly) first. If you get
-   `tools: 30`, the server is fine and the problem is the config.
+   `tools: 32`, the server is fine and the problem is the config. The count is
+   32 whether or not `dotnet-gcdump` is installed — the heap tools register at
+   startup and only look for it when called.
 2. Check that the config path points at `.venv\Scripts\python.exe` and **not**
    plain `python` — the `python` on PATH does not have the venv's packages.
 3. Restart the whole harness application. Reloading a window usually does not
@@ -435,4 +457,4 @@ entry.
 
 ---
 
-Last updated: 2026-08-26 · Tested on Windows 11 Home Single Language 10.0.26200.0 · Python 3.12.10 · mcp 2.0.0 · 30 tools
+Last updated: 2026-08-26 · Tested on Windows 11 Home Single Language 10.0.26200.0 · Python 3.12.10 · mcp 2.0.0 · 32 tools

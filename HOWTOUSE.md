@@ -1,6 +1,6 @@
 # HOWTOUSE — driving an app with winauto-mcp
 
-All 30 tools, what goes in, what comes out, and how to get the most out of
+All 32 tools, what goes in, what comes out, and how to get the most out of
 them.
 
 Installation is in [SETUP.md](SETUP.md) · the guaranteed behaviour, stated
@@ -21,6 +21,7 @@ without reference to the code, is in [docs/SPEC.md](docs/SPEC.md).
   - [Proving something happened](#proving-something-happened)
   - [Remembering a target](#remembering-a-target)
   - [The journal](#the-journal)
+  - [Reading the managed heap (.NET only)](#reading-the-managed-heap-net-only)
 - [Worked patterns](#worked-patterns)
 - [Anti-patterns](#anti-patterns)
 
@@ -507,6 +508,61 @@ not in the client-area pixel space. To act on what you find, take a fresh
 
 ---
 
+### Reading the managed heap (.NET only)
+
+These two answer a different kind of question from every other tool here: not
+*what is on screen*, but **what the app is still holding on to** after you drove
+it. They work on .NET applications — WinForms, WPF, WinUI/Uno, anything on
+CoreCLR — and need `dotnet-gcdump` installed
+([SETUP.md](SETUP.md#requirements)). A native app has no managed heap and they
+say so rather than guessing.
+
+**Do not use the process's memory size for this.** .NET does not hand heap
+segments back to Windows when objects die, so working set stays high with
+nothing leaking and can stay flat while something leaks steadily. These tools
+force a collection first and count only the survivors, so a type still there
+afterwards is genuinely still referenced by something.
+
+#### `heap_snapshot(label)`
+
+| | |
+|---|---|
+| **Input** | a name to file this reading under. Reusing a name replaces it |
+| **Output** | JSON: the label, the pid, live object count, heap bytes, distinct types, the dump file, and the labels currently held |
+| **Rules** | raises if nothing is attached, if the attached process has exited, if it is not .NET, or if `dotnet-gcdump` is missing (the message gives the install command). `attach_window` **discards every held snapshot** — they describe one process |
+| **Cost** | 🔴 **it stops the app while it reads.** Measured at 24 ms of actual pause against a 100 MB heap; the call itself takes ~1.6 s. Each snapshot writes ~3 MB into the journal session folder |
+
+#### `heap_diff(before, after, top=25)`
+
+| | |
+|---|---|
+| **Input** | two labels you took earlier; `top` caps the list |
+| **Output** | JSON: the types that gained instances, biggest gain first — before count, after count, gain, roughly what one instance costs, its assembly, and whether the type is new — plus `types_that_grew` and the change in total objects |
+| **Rules** | raises on a label never taken, and lists the ones held |
+| **Use it** | to name what a screen left behind, by type, instead of by watching a memory graph |
+
+🔴 **Counts are exact; the byte figure is not.** A type deliberately allocated
+20,000 times came back at exactly 20,000 more. The byte column is the size of
+*one* object averaged within a size bucket — summing it over every row accounted
+for only 75.8 % of the heap the same report claimed — so no byte total is
+derived from it, only a per-instance figure to weigh a count against.
+
+🔴 **One before/after pair is not a leak list.** Two snapshots of a process
+doing **nothing but sleeping** differed by **4,217 objects across 255 types**,
+because taking a snapshot itself makes the runtime materialize reflection
+metadata — `RuntimeParameterInfo`, `RuntimeMethodInfo`, `Signature` and strings
+are the usual names in that drift. That is the noise floor, which is why
+`types_that_grew` sits next to the list. Two things cut through it: **repetition**
+(the same cycle five or more times, looking for a type that rises by the same
+amount every round) and **a recognizable name** — a page, a view model, a record
+class of your own appearing at all is worth more than any number in one pair.
+
+Also expect **legitimate** first-time growth: template caches, static resources,
+compiled bindings and JIT state are paid once on the first open and never again.
+That is another reason round one is the least trustworthy round.
+
+---
+
 ## Worked patterns
 
 ### Click a button on a normal Win32 app
@@ -587,6 +643,34 @@ screenshot()           # still works — reading does not need the foreground
 click(366, 54)         # raises the window again by itself
 ```
 
+### Find what a screen leaves behind (.NET apps)
+
+Open a screen, close it, and see which types the app is still holding. Run the
+cycle **several times** — one round cannot tell a leak from the one-off cost of
+opening something for the first time.
+
+```
+attach_window(hwnd)               # also records the pid the heap tools need
+
+heap_snapshot("r0")               # baseline: the screen has never been opened
+click_element("Reports")          # open it
+wait_stable()
+hotkey(["ctrl", "w"])             # close it
+wait_stable()
+heap_snapshot("r1")
+
+...repeat the open/close/snapshot for r2, r3, r4, r5...
+
+heap_diff("r1", "r2")             # skip r0->r1: first-open costs live there
+heap_diff("r2", "r3")
+heap_diff("r4", "r5")
+```
+
+Read the three diffs **together**. A type that gains the same amount in every
+one of them is the leak; a type that appears in only one is noise. `r0` is kept
+anyway — `heap_diff("r0", "r5")` shows the total cost of five visits, which is
+the number worth telling someone.
+
 ---
 
 ## Anti-patterns
@@ -603,7 +687,9 @@ click(366, 54)         # raises the window again by itself
 | A 30-step `run_steps` script for an app you have not driven before | Short scripts of steps you have watched work, each guarded by a `check` |
 | Clear the triple-Escape latch and carry on | Someone demanded the machine back. Stop and ask |
 | `capture_screen()` on every loop iteration | `screenshot()` when you do not need elements; `capture_region` when you only need to check one thing |
+| Call a leak from one `heap_diff` pair | Repeat the cycle; a pair of snapshots differs by thousands of objects with nothing happening at all |
+| Watch the process's memory size to find a .NET leak | It stays high with nothing leaking and flat while leaking. Count objects after a collection |
 
 ---
 
-Last updated: 2026-08-26 · 30 tools · Tested on Windows 11 Home Single Language 10.0.26200.0 · Python 3.12.10 · mcp 2.0.0
+Last updated: 2026-08-26 · 32 tools · Tested on Windows 11 Home Single Language 10.0.26200.0 · Python 3.12.10 · mcp 2.0.0
