@@ -183,13 +183,28 @@ Windows-only. Built and tested against Python 3.12 on Windows 11.
 
 ## Setup
 
+Full instructions — requirements, a client-free verification step, per-harness
+config and troubleshooting — are in **[SETUP.md](SETUP.md)**. The short version:
+
+From the repo root:
+
 ```powershell
-cd F:\tools\winauto-mcp
 python -m venv .venv
 .venv\Scripts\pip install -r requirements.txt
 ```
 
+For what each tool takes and returns, and how to use them well, see
+**[HOWTOUSE.md](HOWTOUSE.md)**.
+
 ## Register with an MCP client
+
+A harness launches the server from a working directory you do not control, so
+these configs need an **absolute** path. Print yours from the repo root and
+substitute it for `<install-dir>` below:
+
+```powershell
+(Resolve-Path .).Path
+```
 
 Claude Desktop / Claude Code `mcpServers` config:
 
@@ -197,25 +212,26 @@ Claude Desktop / Claude Code `mcpServers` config:
 {
   "mcpServers": {
     "winauto": {
-      "command": "F:\\tools\\winauto-mcp\\.venv\\Scripts\\python.exe",
-      "args": ["F:\\tools\\winauto-mcp\\server.py"]
+      "command": "<install-dir>\\.venv\\Scripts\\python.exe",
+      "args": ["<install-dir>\\server.py"]
     }
   }
 }
 ```
 
-Claude Code CLI:
+Claude Code CLI, run from the repo root — PowerShell expands these before
+`claude` sees them:
 
 ```powershell
-claude mcp add winauto -- F:\tools\winauto-mcp\.venv\Scripts\python.exe F:\tools\winauto-mcp\server.py
+claude mcp add winauto -- "$((Resolve-Path .\.venv\Scripts\python.exe).Path)" "$((Resolve-Path .\server.py).Path)"
 ```
 
-Codex Desktop `C:\Users\<you>\.codex\config.toml`:
+Codex Desktop `%USERPROFILE%\.codex\config.toml`:
 
 ```toml
 [mcp_servers.winauto]
-command = 'K:\winauto-mcp\.venv\Scripts\python.exe'
-args = ['K:\winauto-mcp\server.py']
+command = '<install-dir>\.venv\Scripts\python.exe'
+args = ['<install-dir>\server.py']
 enabled = true
 startup_timeout_sec = 30
 ```
@@ -322,7 +338,7 @@ server yet. Recheck the path to `.venv\Scripts\python.exe`, make sure
 
 When using this MCP from Codex/LLM sessions for ZiiDMS desktop UI testing, follow this sequence:
 
-1. Verify the MCP is actually exposed in the active session before falling back to ad-hoc Python calls. Search or inspect available tools for a namespace like `mcp__winauto`. A local folder at `K:\winauto-mcp` is not enough by itself; the client session must be restarted or configured so the MCP server is registered.
+1. Verify the MCP is actually exposed in the active session before falling back to ad-hoc Python calls. Search or inspect available tools for a namespace like `mcp__winauto`. A local clone of this repo is not enough by itself; the client session must be restarted or configured so the MCP server is registered.
 2. Start with `list_windows`. If the target app is missing, launch the app first, wait for the top-level window, then run `list_windows` again. Do not infer failure from `Get-Process.MainWindowHandle = 0` alone; a visible attachable window may still appear in `list_windows`.
 3. Attach by HWND with `attach_window`, then immediately call `capture_screen`. Use the full returned image and UIA summary as the test baseline. Do not rely on cropped screenshots from a chat transcript to decide whether buttons are missing.
 4. Prefer `click_element(name)` for named buttons such as `Save`, `Delete Selected`, `Restore Selected`, `New Department`, and `Include Deleted`. For grid rows or custom-drawn cells, use coordinates from the full client-area image, or `locate_in_region` on a small candidate area; do not eyeball coordinates from resized display crops.

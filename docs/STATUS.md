@@ -5,7 +5,9 @@ finished behaviour lives in [SPEC.md](SPEC.md).
 
 ## Doing right now
 
-Idle. **[PR #4](https://github.com/PingPong2534/winauto-mcp/pull/4) is merged**
+Idle, with three uncommitted doc changes in the working tree — see below.
+
+**[PR #4](https://github.com/PingPong2534/winauto-mcp/pull/4) is merged**
 (`5a82791`, 2026-08-26): the foreground hand-back, `hover` and its pointer hold,
 the overlay fix, and the `smoke.py` Notepad-leak fix are all on `master` now —
 20 files, +2692/−127. There is no open PR.
@@ -25,6 +27,44 @@ launches Notepad, which restores the 55 leaked windows (see below). It is the
 one gap in the current green.
 
 ## Just finished
+
+**Two new documents at the repo root, in English, both uncommitted:**
+
+- **`SETUP.md`** — installation. Leads with the three-layer evidence that this
+  is Windows-only and macOS is *impossible*, not untested: Windows-only wheels
+  at `pip install`, `ctypes.windll` at import (`server.py:10-35`), and
+  `PrintWindow`/UIA/`WH_*_LL` at run time. Requirements and dependency versions
+  are the ones measured on this machine (Python 3.12.10, mcp 2.0.0, venv 97.9
+  MB). Step 3 is a standalone stdio handshake script with its real output —
+  `protocolVersion: 2024-11-05`, `serverInfo: winauto-mcp`, **`tools: 30`** —
+  so an install can be proved good before any harness is configured. Step 4
+  covers Claude Code CLI, VS Code (`servers` schema, not `mcpServers`), Codex
+  TOML and Claude Desktop; **all four carry an explicit "untested, and here is
+  the evidence why"** marker, because none of them is registered on this
+  machine.
+- **`HOWTOUSE.md`** — all 30 tools with input/output/rules, grouped by what
+  they are for, plus worked patterns and an anti-pattern table. The three rules
+  that explain most surprises are stated up front: coordinates are
+  client-relative; a click is refused unless you have looked at *that part* of
+  the window; the machine belongs to the person at it. It spells out which
+  calls do and do not count as having looked — `wait_stable`, `hover` and
+  `replay_frame` deliberately do not.
+
+**No absolute paths in any of the three docs.** Every install and verification
+command is now relative to the repo root. The exception is stated rather than
+hidden: a harness launches the server from a working directory you do not
+control, so its config file genuinely needs a full path — those blocks use an
+`<install-dir>` placeholder and the docs show `(Resolve-Path .).Path` to print
+it, or expand it inline for the `claude mcp add` form.
+
+**`README.md` corrected**: its Codex block said `command = 'K:\winauto-mcp\...'`
+and there is no `K:` drive, so anyone who copied it got a server that never
+loaded. Setup and Register now use relative commands and the placeholder, and
+Setup points at the two new files. One full path remains in the repo, in the
+ZiiDMS agent-usage note at the end of the README — a launcher under a DmsEnv
+repo folder whose name carries a per-machine hash. It is a different project's
+path, not this one's, and cannot be relativized meaningfully; left as it was
+rather than mangled.
 
 **`hover(x, y, dwell_ms=700, force=False)`** — rest the pointer somewhere, wait,
 photograph what the app shows, put the pointer back. Four things were measured
