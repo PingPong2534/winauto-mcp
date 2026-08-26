@@ -7,6 +7,7 @@ like real hardware input to the target app -- this is what lets Unicode
 """
 
 import ctypes
+import ctypes.wintypes
 import time
 
 import win32api
@@ -16,7 +17,14 @@ from window_manager import bring_to_foreground
 
 # --- ctypes SendInput structures -------------------------------------------------
 
-PUL = ctypes.POINTER(ctypes.c_ulong)
+# dwExtraInfo is ULONG_PTR -- a VALUE the sender chooses, which Windows carries
+# through to GetMessageExtraInfo() and to low-level hooks untouched. It was
+# declared here as POINTER(c_ulong) and passed ctypes.pointer(...), which is a
+# widespread copy-paste error: it compiles, input works, and every event goes
+# out stamped with the address of a temporary instead of a value -- a different
+# number each call. That made the field useless for its one purpose, telling
+# our own input apart from the person's.
+ULONG_PTR = ctypes.wintypes.WPARAM
 
 
 class KeyBdInput(ctypes.Structure):
@@ -25,7 +33,7 @@ class KeyBdInput(ctypes.Structure):
         ("wScan", ctypes.c_ushort),
         ("dwFlags", ctypes.c_ulong),
         ("time", ctypes.c_ulong),
-        ("dwExtraInfo", PUL),
+        ("dwExtraInfo", ULONG_PTR),
     ]
 
 
@@ -36,7 +44,7 @@ class MouseInput(ctypes.Structure):
         ("mouseData", ctypes.c_ulong),
         ("dwFlags", ctypes.c_ulong),
         ("time", ctypes.c_ulong),
-        ("dwExtraInfo", PUL),
+        ("dwExtraInfo", ULONG_PTR),
     ]
 
 
@@ -72,7 +80,12 @@ WHEEL_DELTA = 120
 KEYEVENTF_UNICODE = 0x0004
 KEYEVENTF_KEYUP = 0x0002
 
-_EXTRA = ctypes.c_ulong(0)
+# Stamped on every event this process sends, so a keystroke or click can be
+# attributed later. Windows' own LLKHF_INJECTED flag only says "some process
+# injected this" -- an on-screen keyboard, a remote desktop session or another
+# automation tool all set it. This says it was US. Arbitrary constant; it only
+# has to be unlikely to collide with another injector's choice.
+SIGNATURE = 0x7A170001
 
 
 def _send(*inputs: Input):
@@ -82,17 +95,17 @@ def _send(*inputs: Input):
 
 
 def _mouse_input(dx, dy, flags, mouse_data=0):
-    return Input(type=INPUT_MOUSE, ii=InputUnion(mi=MouseInput(dx, dy, mouse_data, flags, 0, ctypes.pointer(_EXTRA))))
+    return Input(type=INPUT_MOUSE, ii=InputUnion(mi=MouseInput(dx, dy, mouse_data, flags, 0, SIGNATURE)))
 
 
 def _key_unicode_input(char_code, key_up=False):
     flags = KEYEVENTF_UNICODE | (KEYEVENTF_KEYUP if key_up else 0)
-    return Input(type=INPUT_KEYBOARD, ii=InputUnion(ki=KeyBdInput(0, char_code, flags, 0, ctypes.pointer(_EXTRA))))
+    return Input(type=INPUT_KEYBOARD, ii=InputUnion(ki=KeyBdInput(0, char_code, flags, 0, SIGNATURE)))
 
 
 def _key_vk_input(vk_code, key_up=False):
     flags = KEYEVENTF_KEYUP if key_up else 0
-    return Input(type=INPUT_KEYBOARD, ii=InputUnion(ki=KeyBdInput(vk_code, 0, flags, 0, ctypes.pointer(_EXTRA))))
+    return Input(type=INPUT_KEYBOARD, ii=InputUnion(ki=KeyBdInput(vk_code, 0, flags, 0, SIGNATURE)))
 
 
 def _screen_to_absolute(x, y):
@@ -113,6 +126,45 @@ def move_to(screen_x, screen_y):
     _send(_mouse_input(abs_x, abs_y, MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK))
 
 
+class _borrowed_cursor:
+    """Put the pointer back where the person left it once the action is done.
+
+    There is one real cursor and it is shared with whoever is at the keyboard,
+    so an automated click that abandons the pointer somewhere in the target
+    app leaves them to find it again. Restoring costs one extra move and makes
+    a run far less disruptive to sit through.
+
+    Not always wanted: anything that keeps following the pointer after the
+    click -- Blender's modal transform after G/R/S, a rubber-band selection
+    continued in a later step -- reads the restored position as the user's
+    intent. Those callers pass keep_cursor=True.
+    """
+
+    def __init__(self, keep_cursor: bool):
+        self.keep_cursor = keep_cursor
+        self.origin = None
+
+    def __enter__(self):
+        if not self.keep_cursor:
+            try:
+                self.origin = win32api.GetCursorPos()
+            except win32api.error:
+                self.origin = None
+        return self
+
+    def __exit__(self, *_exc):
+        if self.origin is None:
+            return False
+        # Let the app finish reacting to the button first: a mouse-move
+        # arriving in the same instant as the click can be read as a drag.
+        time.sleep(0.05)
+        try:
+            move_to(*self.origin)
+        except OSError:
+            pass
+        return False
+
+
 def click_screen(screen_x, screen_y, button="left", double=False):
     down_flag = MOUSEEVENTF_LEFTDOWN if button == "left" else MOUSEEVENTF_RIGHTDOWN
     up_flag = MOUSEEVENTF_LEFTUP if button == "left" else MOUSEEVENTF_RIGHTUP
@@ -128,7 +180,7 @@ def click_screen(screen_x, screen_y, button="left", double=False):
             time.sleep(0.05)
 
 
-def scroll_in_window(hwnd, client_x, client_y, clicks: int):
+def scroll_in_window(hwnd, client_x, client_y, clicks: int, keep_cursor: bool = False):
     """Scroll the mouse wheel at (client_x, client_y) in the window's client
     area. Positive `clicks` scrolls up/away from the user, negative scrolls
     down -- matches the sign convention of a physical wheel notch."""
@@ -137,13 +189,15 @@ def scroll_in_window(hwnd, client_x, client_y, clicks: int):
     bring_to_foreground(hwnd)
     time.sleep(0.05)
     screen_x, screen_y = win32gui.ClientToScreen(hwnd, (int(client_x), int(client_y)))
-    move_to(screen_x, screen_y)
-    time.sleep(0.03)
-    delta = (clicks * WHEEL_DELTA) & 0xFFFFFFFF  # mouseData is c_ulong; pack signed value
-    _send(_mouse_input(0, 0, MOUSEEVENTF_WHEEL, mouse_data=delta))
+    with _borrowed_cursor(keep_cursor):
+        move_to(screen_x, screen_y)
+        time.sleep(0.03)
+        delta = (clicks * WHEEL_DELTA) & 0xFFFFFFFF  # mouseData is c_ulong; pack signed value
+        _send(_mouse_input(0, 0, MOUSEEVENTF_WHEEL, mouse_data=delta))
 
 
-def drag_in_window(hwnd, x1, y1, x2, y2, button="left", steps: int = 12, step_delay: float = 0.02):
+def drag_in_window(hwnd, x1, y1, x2, y2, button="left", steps: int = 12, step_delay: float = 0.02,
+                   keep_cursor: bool = False):
     """Drag from (x1, y1) to (x2, y2), both client-relative. Presses the
     button down at the start point, moves through `steps` intermediate
     points (many apps -- including Godot -- only recognize a drag if they
@@ -159,21 +213,23 @@ def drag_in_window(hwnd, x1, y1, x2, y2, button="left", steps: int = 12, step_de
     sx1, sy1 = win32gui.ClientToScreen(hwnd, (int(x1), int(y1)))
     sx2, sy2 = win32gui.ClientToScreen(hwnd, (int(x2), int(y2)))
 
-    move_to(sx1, sy1)
-    time.sleep(0.03)
-    _send(_mouse_input(0, 0, down_flag))
-    time.sleep(0.03)
-    for i in range(1, steps + 1):
-        t = i / steps
-        move_to(int(sx1 + (sx2 - sx1) * t), int(sy1 + (sy2 - sy1) * t))
-        time.sleep(step_delay)
-    time.sleep(0.03)
-    _send(_mouse_input(0, 0, up_flag))
+    with _borrowed_cursor(keep_cursor):
+        move_to(sx1, sy1)
+        time.sleep(0.03)
+        _send(_mouse_input(0, 0, down_flag))
+        time.sleep(0.03)
+        for i in range(1, steps + 1):
+            t = i / steps
+            move_to(int(sx1 + (sx2 - sx1) * t), int(sy1 + (sy2 - sy1) * t))
+            time.sleep(step_delay)
+        time.sleep(0.03)
+        _send(_mouse_input(0, 0, up_flag))
 
 
-def click_in_window(hwnd, client_x, client_y, button="left", double=False, modifiers=None):
+def click_in_window(hwnd, client_x, client_y, button="left", double=False, modifiers=None,
+                    keep_cursor: bool = False):
     """Click at coordinates relative to the window's client area (same space
-    as the image returned by screenshot.capture_window_png). `modifiers`, if
+    as the image returned by screenshot.grab_window). `modifiers`, if
     given, is a list like ["ctrl"] or ["shift"] held down for the duration of
     the click -- e.g. for ctrl/shift-click multi-selection in a tree/list."""
     import win32gui
@@ -193,7 +249,8 @@ def click_in_window(hwnd, client_x, client_y, button="left", double=False, modif
         _send(_key_vk_input(vk, key_up=False))
         time.sleep(0.02)
     try:
-        click_screen(screen_x, screen_y, button=button, double=double)
+        with _borrowed_cursor(keep_cursor):
+            click_screen(screen_x, screen_y, button=button, double=double)
     finally:
         for vk in reversed(mod_vks):
             _send(_key_vk_input(vk, key_up=True))

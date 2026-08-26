@@ -22,6 +22,13 @@ class Overlay:
         self._cmd_q = queue.Queue()
         self._tracked_hwnd = None
         self._highlights = []
+        # What is currently on screen. The poll loop compares against this and
+        # touches Tk only when it disagrees. Repainting a transparent topmost
+        # window the size of the target every 150ms for the whole session is
+        # enough compositor work to make the tracked app feel like it is
+        # stuttering -- and the outline itself flickers, which reads as the
+        # automation having hung when it is only redrawing.
+        self._drawn = None
         self._ready = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
@@ -49,6 +56,7 @@ class Overlay:
                 elif cmd == "untrack":
                     self._tracked_hwnd = None
                     self._highlights = []
+                    self._drawn = None
                     self.root.withdraw()
                 elif cmd == "highlights":
                     self._highlights = data
@@ -67,6 +75,7 @@ class Overlay:
                     pass
             else:
                 self._tracked_hwnd = None
+                self._drawn = None
                 self.root.withdraw()
 
         self.root.after(self._poll_ms, self._tick)
@@ -76,6 +85,13 @@ class Overlay:
         width, height = right - left, bottom - top
         if width <= 0 or height <= 0:
             return
+        # Nothing has moved and nothing is highlighted differently, so the
+        # pixels already on screen are correct. Reading the rect is cheap; it
+        # is the drawing that costs, so the poll stays fast and the paint stops.
+        state = (rect, tuple(self._highlights))
+        if state == self._drawn:
+            return
+        self._drawn = state
         self.root.deiconify()
         self.root.geometry(f"{width}x{height}+{left}+{top}")
         self.canvas.config(width=width, height=height)
