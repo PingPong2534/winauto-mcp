@@ -251,17 +251,26 @@ def _seen_view_at(x: int, y: int):
 # Tools whose effect is visual and worth a before/after frame in the journal.
 # Everything else is journaled as text only: a window list or a UIA query
 # doesn't change the screen, so a frame pair would cost two captures and show
-# nothing. capture_screen/screenshot are excluded for a different reason --
-# they hand their own frame to journal_frame() rather than being captured twice.
+# nothing. capture_screen/screenshot/hover are excluded for a different reason
+# -- they hand their own frame to journal_frame() rather than being captured
+# twice.
 _FRAME_TOOLS = frozenset(
     {"click", "click_element", "drag", "scroll", "type_text", "press_key", "hotkey"}
 )
 
 # Tools that hold the person's keyboard while they run. The same set that
-# sends input, plus run_steps, which sends input through all of them at once.
-# The lease is taken and released by the journaled wrapper rather than inside
-# each tool, so there is exactly one place that can fail to give it back.
-_HOLDING_TOOLS = _FRAME_TOOLS | {"run_steps"}
+# sends input, plus run_steps, which sends input through all of them at once,
+# and hover, whose whole result is ruined by a keystroke that dismisses the
+# tooltip it is waiting for. The lease is taken and released by the journaled
+# wrapper rather than inside each tool, so there is exactly one place that can
+# fail to give it back.
+#
+# hover additionally holds the *mouse*, which nothing else does. That lease is
+# taken inside hover() rather than here, because it must be released after the
+# picture is taken and before the pointer is put back -- a span narrower than
+# the tool call, and the only tool for which the pointer is the subject rather
+# than the instrument. See input_guard.holding_mouse.
+_HOLDING_TOOLS = _FRAME_TOOLS | {"run_steps", "hover"}
 
 # How long the keyboard is held for one action. Generous enough for a slow
 # click on a busy app, short enough that a crash between taking and releasing
@@ -271,6 +280,18 @@ _ACTION_LEASE = 5.0
 # A whole script holds the keyboard across all its steps, renewed as it goes,
 # so the person is not let in and out between every click.
 _SCRIPT_LEASE = 15.0
+
+# Tools that end by giving the person their window back. The same set that
+# takes the foreground in order to send input -- and run_steps, which is one
+# interaction from the person's point of view no matter how many steps it has,
+# so the hand-back happens once at the end rather than between every step.
+_RETURNS_FOCUS = _HOLDING_TOOLS
+
+# Whether that hand-back happens at all. Off is for an interaction that spans
+# several tool calls and dies if focus moves between them -- Blender's G/R/S
+# transform, a rubber-band selection continued in a later call, an app-drawn
+# dropdown that a_menu_is_open() cannot see.
+_focus_return = {"enabled": True}
 
 _INTERRUPTED_NOTE = (
     " -- NOTE: the person pressed {n} key(s) while this ran, and they were held out."
@@ -451,6 +472,21 @@ def journaled(fn):
         after = _state["post_frame"]
         if after is None and wants_frames and error is None:
             after = _try_grab()
+
+        # Hand the desktop back the moment the action is over, so the person
+        # can type into their own window without waiting for anyone to
+        # remember to release it. After the frame above, not before: the
+        # fallback path of a capture reads the screen, and by then the screen
+        # would be showing their window instead of ours.
+        #
+        # Outside the try/except that wraps the action itself, because an
+        # action that raised took the foreground just the same -- and a failure
+        # is exactly when nobody is coming back to tidy up.
+        if name in _RETURNS_FOCUS and _focus_return["enabled"]:
+            try:
+                window_manager.hand_back_foreground()
+            except Exception:  # noqa: BLE001 - never turn a courtesy into a failure
+                pass
 
         hwnd = _state["hwnd"]
         journal.record(
@@ -674,6 +710,163 @@ def click_element(name: str, button: str = "left", double: bool = False) -> str:
     input_sim.click_in_window(hwnd, cx, cy, button=button, double=double)
     note = f" (ambiguous: {count} elements matched, clicked the first)" if count > 1 else ""
     return f'clicked element "{el["name"]}" at ({cx}, {cy}){note}'
+
+
+def _popup_text(hwnd) -> str | None:
+    """The visible text of a popup window, read rather than photographed.
+
+    Measured 2026-08-26 (tests/probe_hover.py): a Win32 tooltip's UIA Name is
+    exactly the string the app set. A caller can assert on that; it cannot
+    assert on a picture of pale grey text.
+    """
+    try:
+        import uiautomation as auto
+
+        control = auto.ControlFromHandle(hwnd)
+        return control.Name or None
+    except Exception:  # noqa: BLE001 - a popup with no UIA is still worth reporting
+        return None
+
+
+# How long the pointer sits on the target before the picture is taken. Windows'
+# own SPI_GETMOUSEHOVERTIME is 500ms, which is what a tooltip waits for, so
+# anything shorter photographs the moment before it appears.
+HOVER_DWELL_MS = 700
+
+# The pointer is held for the dwell plus enough to aim, photograph and put it
+# back. Capped hard by input_guard.MAX_MOUSE_LEASE_SECONDS regardless.
+_HOVER_LEASE_MARGIN = 1.2
+
+
+@tool
+def hover(x: int, y: int, dwell_ms: int = HOVER_DWELL_MS, force: bool = False):
+    """Rest the pointer on (x, y) in the attached window's client area, wait
+    for the app to react, and return what appeared -- a tooltip, a hover
+    highlight, a menu that opens on hover.
+
+    This is the one tool that holds the mouse. For the length of the dwell the
+    pointer is pinned where it was put and the person's mouse is held out,
+    because a hand on the mouse during that half-second moves the pointer off
+    the target and the picture is of nothing. The hold ends when the tool
+    returns, and expires on its own regardless. The pointer is then put back
+    exactly where the person left it and their window is handed back, so a
+    hover costs them a stutter rather than an interruption.
+
+    It refuses to take the mouse at all if a button is physically down -- that
+    is a drag in progress and interrupting it would strand it -- and after the
+    escape chord has been used. In both cases the hover still happens, and the
+    result says the pointer was not held so you can judge the picture
+    accordingly.
+
+    Returns a report plus an image. The image is a screen grab, not the usual
+    window render: measured, PrintWindow does NOT contain tooltips, because a
+    tooltip is its own top-level window and PrintWindow renders one window.
+    So the attached window must be in front and unobscured for this to show
+    anything -- which it is, since hovering brings it forward.
+
+    The report names every window that appeared during the dwell, with its
+    class, its position in client coordinates and its text read via UIA. Read
+    the text rather than the image where you can: a popup that opened outside
+    the window's client area is described there but cannot be in the picture.
+
+    Looking at a hover image does not count as having looked at the window --
+    what it shows is gone by the time anything could be clicked. To click
+    something you found this way, screenshot() first and aim from that.
+    """
+    hwnd = _require_attached()
+    dwell = max(0, min(int(dwell_ms), 5000)) / 1000.0
+    if not force:
+        blocked = _stale_block(x, y, f"hover({x}, {y})")
+        if blocked is not None:
+            return blocked
+
+    import win32api
+    import win32gui
+
+    input_sim.bring_to_foreground(hwnd)
+    time.sleep(0.05)
+    screen_x, screen_y = win32gui.ClientToScreen(hwnd, (int(x), int(y)))
+    origin = win32api.GetCursorPos()
+    before = window_manager.visible_top_levels()
+
+    lease = dwell + _HOVER_LEASE_MARGIN
+    with input_guard.holding_mouse(lease) as hold:
+        # Two moves, not one: a tooltip is armed by movement *into* the tool,
+        # and a single jump can leave the app with nothing to notice.
+        input_sim.move_to(screen_x - 24, screen_y - 24)
+        time.sleep(0.05)
+        input_sim.move_to(screen_x, screen_y)
+        time.sleep(dwell)
+
+        frame = grab_window(hwnd, allow_occluded=False)
+        # The outline is ours and it is shown when a window starts being driven,
+        # so on a first hover it appears *during* the dwell and would be
+        # reported as something the app popped up. Its handle does not exist
+        # until it has been shown once, which is why this is read here and not
+        # before the dwell -- read too early it is None and excludes nothing.
+        after = window_manager.visible_top_levels([h for h in (get_overlay().hwnd,) if h])
+        appeared = [(h, cls, rect) for h, (cls, rect) in after.items() if h not in before]
+
+        # Back inside the hold, so the person's swallowed movements cannot
+        # fight the restore and leave the pointer somewhere neither of us put it.
+        input_sim.move_to(*origin)
+        moved_by_person = input_guard.mouse_interrupted_since(hold.mark)
+
+    cl, ct, _, _ = window_manager.get_client_rect_screen(hwnd)
+    popups = []
+    for popup_hwnd, cls, (pl, pt, pr, pb) in appeared:
+        client_rect = [pl - cl, pt - ct, pr - cl, pb - ct]
+        popups.append({
+            "class": cls,
+            "rect": client_rect,
+            "text": _popup_text(popup_hwnd),
+            "in_the_image": (
+                client_rect[0] >= 0 and client_rect[1] >= 0
+                and client_rect[2] <= frame.width and client_rect[3] <= frame.height
+            ),
+        })
+
+    report = {
+        "hovered": [x, y],
+        "dwell_ms": round(dwell * 1000),
+        "pointer_held": hold.locked,
+        "appeared": popups,
+    }
+    if not hold.locked:
+        report["pointer_not_held_because"] = hold.reason
+        report["note"] = (
+            "the pointer was not pinned, so anything touching the mouse during the dwell "
+            "could have moved it off the target -- check the image shows what you expected"
+        )
+    if moved_by_person:
+        report["person_moved_the_mouse"] = moved_by_person
+    if not popups:
+        report["note_no_popups"] = (
+            "nothing new appeared. The app may draw its hover state inside its own window "
+            "(a highlight, not a popup), which the image will show; or it may need a "
+            "longer dwell_ms; or there is nothing to hover at these coordinates."
+        )
+
+    # Deliberately does NOT mark anything as seen, so a coordinate read off a
+    # hover image is refused once and you are shown the settled window first.
+    # Two reasons, and either alone is enough:
+    #
+    # The picture shows a transient. The tooltip in it is gone by the time
+    # anything could be clicked, so it is not a sound basis for aiming.
+    #
+    # And the capture paths do not agree. Measured 2026-08-26 across the probe's
+    # two frames of the same window: outside the tooltip, PrintWindow and a
+    # screen grab differ on 0.87% of pixels, worst channel delta 245, spread
+    # across the lower half rather than confined to the borders -- unexplained.
+    # Marking a screen grab as seen and then comparing it against a PrintWindow
+    # frame would refuse clicks over a difference in how the picture was taken.
+    # The journal gets the settled frame regardless; that is bookkeeping, not
+    # something the caller aimed from.
+    settled = _try_grab()
+    if settled is not None:
+        journal_frame(settled)
+
+    return [json.dumps(report, ensure_ascii=False), Image(data=to_png(frame), format="png")]
 
 
 @tool
@@ -1171,6 +1364,32 @@ def release_control() -> str:
         return "nothing to give back -- no window was displaced, or it has since closed"
     return (f'foreground returned to "{title}"; outline hidden; keyboard released; '
             "reading the attached window still works")
+
+
+@tool
+def keep_foreground(enabled: bool) -> str:
+    """Stop giving the person their window back after every action, or start again.
+
+    By default every action that takes the foreground hands it back the moment
+    it finishes, so the person can type into their own window during the gaps
+    without their keystrokes landing in the app being automated.
+
+    Call keep_foreground(true) before an interaction that spans several tool
+    calls and would break if focus moved between them: a Blender G/R/S
+    transform, a rubber-band selection continued in a later call, or a menu the
+    app draws itself -- Windows does not report those, so the automatic
+    hand-back cannot know to skip them. Call keep_foreground(false) afterwards.
+
+    Menus that Windows owns are already handled: the hand-back skips itself
+    while one is open, and does not lose track of the window it owes."""
+    _focus_return["enabled"] = not bool(enabled)
+    if enabled:
+        return ("holding the foreground; the person will NOT get their window back "
+                "between actions. Call keep_foreground(false) when the interaction "
+                "is over, or release_control() to hand it back now")
+    title, reason = window_manager.hand_back_foreground()
+    return ("handing the foreground back after each action again; "
+            + (f'gave it back to "{title}" now' if title else f"nothing given back now ({reason})"))
 
 
 @tool

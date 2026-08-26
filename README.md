@@ -75,8 +75,19 @@ Windows-only. Built and tested against Python 3.12 on Windows 11.
   *input* still needs the window in front.
 - **The pointer is shared**: `click`/`drag`/`scroll` put the mouse back where
   the person left it (`keep_cursor=true` opts out, for modal tools that keep
-  following the pointer), and `release_control()` hands the foreground back to
-  the window they were using.
+  following the pointer).
+- **So is the foreground, and it is given back by itself**: input needs the
+  target window in front, so an action raises it — and hands the desktop
+  straight back when the action ends, so a key typed in the gap between two
+  actions lands where the person is looking instead of in the app being driven.
+  `run_steps` hands back once at the end, not between steps. It **refuses** to
+  hand back while a menu is open (a menu dies when its owner loses focus, and
+  an open menu blocks foreground changes desktop-wide anyway) without forgetting
+  what it owes, and **forgets** rather than yanks if the person has already
+  moved somewhere else. Menus the app draws itself — XAML/WinUI, Electron, Qt,
+  games — cannot be detected; `keep_foreground(true)` is the way to hold the
+  window for an interaction that spans several calls
+  (`tests\diag_focus_return.py`, 18 checks).
 - **Attaching is not taking over**: `attach_window` only chooses which window
   the other tools mean. It does not raise the window and draws no outline —
   the window is raised, and the green outline appears, by itself at the first
@@ -93,6 +104,18 @@ Windows-only. Built and tested against Python 3.12 on Windows 11.
   poll compares against what is already drawn and touches Tk only on a real
   change: measured 1 repaint over 3 idle seconds, against ~20 before, while a
   window that does move still updates (`tests\diag_overlay_paint.py`).
+  It also **cannot take the foreground**: showing a Tk window activates it, so
+  the outline was stealing focus from the very window it was outlining — found
+  when a focus check reported a handle that was neither the person's window nor
+  the app's, and printing its class named it. A decoration holding the
+  foreground means keystrokes are aimed at a rectangle. The first fix for this
+  was wrong and passed its diagnostic anyway for a day: it marked the handle Tk
+  returns from `wm_frame()`, which is **not** the window that ends up on screen.
+  What works is `winfo_id()` walked up with `GA_ROOT`, on the Tk thread, which
+  resolves correctly even while the window is withdrawn — so the style goes on
+  before the window is ever mapped and there is no first showing to race
+  (`tests\probe_overlay_activation.py` asks this of the window actually
+  visible, over three show/hide cycles).
 - **The keyboard is shared too, and the tool knows whose keystroke is whose**:
   every event this server sends carries a signature Windows delivers untouched,
   so a key event can be attributed to the person, to us, or to a third
@@ -106,10 +129,22 @@ Windows-only. Built and tested against Python 3.12 on Windows 11.
 - **The keyboard always comes back**, by five routes that do not depend on each
   other: the block is a **lease** that expires by itself within 20 seconds with
   no release call and no working server needed; **three Escapes** inside 1.5 s
-  release it *and* latch it off until `release_keyboard()`; the **mouse is
-  never blocked**; Windows discards a hook that is too slow and all hooks of a
-  process that exits; and Ctrl+Alt+Del is beneath any hook by OS design.
-  Nothing is installed at all until the first input is sent.
+  release it *and* latch it off until `release_keyboard()`; the **mouse keeps
+  working** (only `hover` ever takes it, below); Windows discards a hook that is
+  too slow and all hooks of a process that exits; and Ctrl+Alt+Del is beneath
+  any hook by OS design. Nothing is installed at all until the first input is
+  sent.
+- **`hover` is the one tool that pins the mouse**, and only for its dwell:
+  otherwise a hand on the mouse — or the person's own drift — slides the pointer
+  off the target and the picture is of nothing. A low-level hook returning 1
+  genuinely pins the cursor rather than just hiding events from apps (measured);
+  `ClipCursor` was rejected because that state belongs to no process, so a crash
+  mid-hold would trap a stranger's pointer. The hold is a **3-second** lease,
+  is **refused outright** while a mouse button is physically down (that is a
+  drag, and interrupting it strands it), is released by the same three Escapes,
+  and reads **no pointer coordinate at all**. Every refusal still performs the
+  hover and says the pointer was not pinned
+  (`tests\probe_mouse_lock.py`, `tests\diag_hover.py`).
 
 ## Tools
 
@@ -130,11 +165,13 @@ Windows-only. Built and tested against Python 3.12 on Windows 11.
 | `hotkey(keys)` | Press a chord together, e.g. `["ctrl", "shift", "p"]` for Ctrl+Shift+P |
 | `scroll(x, y, clicks, keep_cursor)` | Mouse-wheel scroll at client-relative coordinates (positive = up, negative = down) |
 | `drag(x1, y1, x2, y2, button, force, keep_cursor)` | Drag from one point to another -- moves through intermediate points, not a teleport, since many apps only recognize a drag if the mouse visibly moves while held. Same stale-target refusal as `click` |
+| `hover(x, y, dwell_ms, force)` | Rest the pointer on a point, hold the mouse still for `dwell_ms` (default 700, Windows' own hover time is 500), and return **what appeared** -- every window that was not there before, with its class, its rect in client coordinates and its text read via UIA -- plus a screen grab. `PrintWindow` cannot render another window's tooltip, so this is the one tool that must capture from the screen. The pointer goes back where the person left it. A hover image does **not** count as having looked at the window: what it shows is gone before anything could be clicked, so `screenshot()` first if you want to click what you found |
 | `run_steps(steps, delay_ms, stop_on_error, stop_if_user_types)` | Run up to 40 actions in one call, in order, with `delay_ms` between them: `click`, `drag`, `scroll`, `type`, `key`, `hotkey`, `click_element`, `wait`, `wait_stable`, `capture` (returns a crop mid-run), `check` (stops the run if a region didn't change / did change as predicted). The whole script is validated before any step runs, and each step is journaled with its own before/after frames. Holds the person's keyboard for the whole script and stops if they press a key anyway. **Only step 1 is guarded against a stale coordinate** |
 | `wait_stable(timeout, settle_ms, interval, threshold, region)` | Poll until the window (or `region` of it) stops repainting for `settle_ms`. Never called automatically -- reports timing, not pixels, so take a fresh screenshot after |
 | `history(last, tool_name, failures_only)` | The steps taken so far this session, from the journal, with their arguments, results and which frames were kept |
 | `replay_frame(seq, which)` | The before/after screen image stored for step `seq` -- evidence for "what did it look like then?", downscaled, never a coordinate source |
-| `release_control()` | Put the window the person was using back in front, hide the tracking outline and release the keyboard. Reading the attached window keeps working from behind; the next action takes it again by itself |
+| `release_control()` | Put the window the person was using back in front, hide the tracking outline and release the keyboard. Unconditional, where the automatic hand-back refuses. Reading the attached window keeps working from behind; the next action takes it again by itself |
+| `keep_foreground(enabled)` | `true` stops actions handing the desktop back, so the driven window stays in front — for an interaction that spans several calls and dies if focus moves. `false` restores the default and hands back immediately if a window is owed |
 | `keyboard_status()` | Whether the block is on, how much lease is left, whether the person latched it off with three Escapes, and whether any human key event has happened -- a count and a time, **never which keys** |
 | `release_keyboard(enable_blocking=True)` | Hand the keyboard back now and clear the triple-Escape latch (the only thing that clears it). `enable_blocking=false` switches blocking off for the rest of the session |
 | `locate_in_region(x1, y1, x2, y2, threshold)` | Find exact click coordinates by pixel contrast within a small region -- returns the tight content bbox and its center. Use instead of eyeballing coordinates off a displayed screenshot crop, which has repeatedly been wrong by 50-150+ px (displayed crops can be rescaled in ways that don't map back to real source pixels) |

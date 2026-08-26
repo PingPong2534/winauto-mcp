@@ -40,7 +40,7 @@ the ways out do not depend on each other:
 |---|---|
 | **It is a lease, not a lock** | The block expires by itself after at most 20 seconds. No release call, no cooperating caller and no working server is needed for the keyboard to return. |
 | **Three Escapes** | Three presses of Esc within 1.5 seconds release it immediately **and latch it off**, so nothing takes it again until `release_keyboard()` is called. Someone reaching for this is having a problem; silently re-blocking them would be the worst possible response. |
-| **The mouse is never blocked** | A held keyboard with a working mouse is an inconvenience. Blocking both would be locking someone out of their own machine. |
+| **The mouse keeps working** | A held keyboard with a working mouse is an inconvenience; blocking both would be locking someone out of their own machine. The one exception is `hover`, which pins the pointer for its dwell on much tighter terms — see [Sharing the mouse](#sharing-the-mouse-hover-only) below. No other tool ever takes the mouse. |
 | **Windows removes it** | Windows discards a keyboard hook whose handler is too slow, and discards all of a process's hooks when it exits. A hung or killed server therefore heals by itself. |
 | **Ctrl+Alt+Del** | Handled by Windows beneath any hook and cannot be blocked here, by design of the OS. |
 
@@ -52,6 +52,76 @@ reads screens never installs one.
 pressed a key returns its normal result plus a note that N key events were held
 out, and `run_steps` stops at that step by default. Someone reaching for the
 keyboard mid-run wants the machine more than the script does.
+
+## Sharing the mouse (hover only)
+
+`hover` is the **only** tool that takes the mouse, and it takes it for the
+length of one dwell. While it is held the pointer does not move: neither the
+person's hand nor any other automation on the machine can shift it off the
+target. This is not cosmetic — a hover is a photograph of what an app shows
+while the pointer rests somewhere, and a pointer that slid away half a second
+earlier photographs nothing.
+
+**What is recorded: nothing, and less than for the keyboard.** Not where the
+pointer is, not where it was going, not which button — the position that every
+mouse event carries is never read at all, so no path exists by which it could
+be stored. All that survives a hover is a count of "the person moved the mouse
+while it was held", which is reported back so a caller can distrust the picture.
+
+**The mouse always comes back**, by the same independent routes as the keyboard
+and two of its own:
+
+| | |
+|---|---|
+| **A three-second lease, hard-capped** | Whatever a caller asks for, the hold expires by itself after at most 3 seconds — against the keyboard's twenty, because a stuck pointer is worse than stuck keys. |
+| **Three Escapes release it too** | The keyboard escape chord switches the mouse hold off as well, and the same latch keeps it off until `release_keyboard()` is called. |
+| **Not taken mid-drag** | If a mouse button is physically down, someone is dragging something; the hold is **refused outright** rather than taken, because interrupting a drag strands it. |
+| **Refused, never failed** | Every refusal — button down, latched off, hook unavailable — lets the hover happen anyway with the pointer free, and says in the result that it was not pinned. A hover with an unreliable picture beats a tool that will not run. |
+| **Windows removes it** | Same as the keyboard: a too-slow handler is discarded, and every hook of a dead process is torn down. A crashed server cannot leave the pointer pinned. |
+
+**Nothing that outlives this process is used to do it.** Confining the pointer
+with the obvious system call was rejected: that setting belongs to no process,
+so a server that died holding it would leave a stranger's pointer trapped in a
+box with nothing left to release it. A hook is owned by the process that
+installed it, and Windows tears it down when that process goes.
+
+**Unlike the keyboard, another injector is held out too.** The keyboard lets
+foreign injected events through; the mouse hold does not, because the picture
+is ruined regardless of who moved the pointer.
+
+## Sharing the foreground with the person
+
+Sending input requires the target window to be in front, so an action raises
+it. **When the action finishes, the desktop is handed straight back** to
+whatever window was in front beforehand — so a key typed in the gap between two
+actions lands in the window the person is looking at, and not in the middle of
+the app being driven. It happens after every tool that sends input, and **once**
+at the end of `run_steps` rather than between its steps, since a script is one
+interaction however many steps it has.
+
+The refusals matter more than the hand-back:
+
+| | |
+|---|---|
+| **Only what it took** | The window handed back to is the one automation itself displaced. A window nobody displaced is never raised. |
+| **Not while a menu is open** | A menu closes the moment its owner loses focus, so handing back would undo the click that opened it. What is owed is **not forgotten** — the hand-back happens when a later action ends with the menu closed. An open menu also blocks any foreground change desktop-wide, so this is correctness, not only manners. |
+| **Not if the person moved on** | If a third window took the foreground after automation did, the person has already gone elsewhere; what is owed is forgotten rather than yanked back. |
+| **Not if the window is gone** | A window that has closed or been hidden is dropped silently. |
+| **Never fails an action** | A hand-back that cannot happen changes nothing about the action's result. |
+
+**Known blind spot.** "A menu is open" is answered from menus *Windows* owns.
+A menu the app draws itself — XAML/WinUI, Electron, Qt, a game's own UI — is
+paint inside the window and is invisible here; Windows 11 Notepad's own File
+menu is one. For those, `keep_foreground(true)`.
+
+**The tracking outline never holds the foreground.** It is a decoration; if it
+did, keystrokes would be aimed at a rectangle and the person's window would
+never come back. Windows is told the outline may not be activated **before the
+outline is ever shown**, so there is no first appearance during which it is
+still allowed the foreground. This was wrong once in a way that read as
+correct: the style was applied to a handle that was not the window that ends up
+on screen, and the diagnostic covering it passed anyway for a day. It is now
+asserted of the window actually visible, across repeated show/hide cycles.
 
 ## Reading the screen
 
@@ -162,7 +232,8 @@ keyboard mid-run wants the machine more than the script does.
 Sending input **requires the window in front**, and uses the one real mouse
 and keyboard. Every input tool raises the window if it is not already there,
 and holds the person's keyboard out for as long as it runs (above), returning a
-note on its normal result if they pressed a key while it did.
+note on its normal result if they pressed a key while it did. `hover` is the
+only one that also takes the **mouse**, and only for its dwell.
 
 ### `click(x, y, button="left", double=False, modifiers=None, force=False, keep_cursor=False)`
 - **Output** on success, a line stating what was clicked.
@@ -206,6 +277,40 @@ note on its normal result if they pressed a key while it did.
   order and releases in reverse; entries are those same names or a single
   a–z/0–9 character.
 
+### `hover(x, y, dwell_ms=700, force=False)`
+- **Input** a point in the attached window's client area, and how long to rest
+  there. `dwell_ms` is clamped to 0–5000. The default is 700 because Windows'
+  own hover time is 500 ms, so anything shorter photographs the instant before
+  a tooltip appears.
+- **Output** a report **plus an image**. The report gives the point hovered,
+  the dwell actually used, whether the pointer was pinned, and `appeared`: one
+  entry per window that was **not** on screen before the dwell and was after —
+  its window class, its rectangle in the target's client coordinates, its text,
+  and whether it falls inside the returned image. The text is *read* through UI
+  Automation, not transcribed from pixels, so a caller can assert on it. If
+  nothing appeared the report says so and names the three reasons why (the app
+  draws its hover state inside its own window, the dwell was too short, or
+  there is nothing there).
+- **Rules — the image is a screen grab.** Not the usual off-screen render of
+  the window, which **cannot contain a tooltip**: a tooltip is a separate
+  top-level window, and that render draws one window. The consequence is that
+  the target must be in front and unobscured, which it is, because hovering
+  raises it.
+- **Rules — a hover image does not count as having been seen.** A coordinate
+  read off one is refused by the stale-target check exactly as if the window
+  had never been looked at, and the caller is shown a settled `screenshot()`
+  first. What the picture shows is a transient that is gone before anything
+  could be clicked; separately, the two capture paths do not agree pixel for
+  pixel, and a claim of "you have seen this" that is 99% true is worse than
+  none.
+- **Rules — the pointer.** Held for the dwell and put back exactly where the
+  person left it, with the restore happening *while still held* so nothing can
+  fight it. A popup that appeared outside the window's client area is described
+  in the report but is not in the picture; `in_the_image` says which is which.
+- **Rules** Same stale-target refusal as `click`, on the hovered point, skipped
+  by `force=true`. The hand-back applies: the person's window comes back
+  afterwards like any other action.
+
 ### `click_element(name, button="left", double=False)`
 - **Rules** Finds a UI Automation element by visible name (exact, then
   substring, case-insensitive) and clicks its centre. Fails if nothing
@@ -221,6 +326,22 @@ note on its normal result if they pressed a key while it did.
   attachment survives; **reading the window keeps working from behind**. It is
   the caller's job not to call this mid-interaction, because a menu opened by
   the previous click closes when its window loses focus.
+- **Against the automatic hand-back** Unconditional where that one refuses: it
+  asks none of the questions above, because the caller has said the interaction
+  is over. It also releases the keyboard and removes the outline, which the
+  hand-back does not.
+
+### `keep_foreground(enabled)`
+- **Output** confirmation stating whether actions will hand the desktop back,
+  and, when switching back on, the window handed back immediately if one was
+  owed.
+- **Rules** `true` suppresses the automatic hand-back for the rest of the
+  session: actions raise the target and **leave it in front**. `false` restores
+  the default and hands back at once if a window is owed. Changes nothing about
+  the keyboard, the outline, or the attachment.
+- **What it is for** An interaction that spans several tool calls and dies if
+  focus moves between them: a Blender G/R/S transform, a rubber-band selection
+  continued in a later call, an app-drawn dropdown that cannot be detected.
 
 ### `keyboard_status()`
 - **Output** JSON: whether the block is on, how many seconds of lease remain,
@@ -247,8 +368,12 @@ note on its normal result if they pressed a key while it did.
   being read is not outlined.
 - **Rules** It is repainted only when the window's rectangle or the highlight
   boxes actually change. A window sitting still is not redrawn, no matter how
-  long the session runs; a window that moves is followed. It is click-through
-  and changes nothing about the target app.
+  long the session runs; a window that moves is followed. It is click-through,
+  **can never become the foreground window** — marked unactivatable before its
+  first appearance, re-asserted on every show — and changes nothing about the
+  target app. It is also excluded by handle from what `hover` reports as having
+  appeared, so our own decoration is never mistaken for something the app
+  popped up.
 - **Why the rule exists** Redrawing a transparent always-on-top window the
   size of the target several times a second for a whole session is enough
   compositor work to make the tracked app stutter, and makes the outline
@@ -369,8 +494,8 @@ Every tool call is appended to a session folder under
 
 | | |
 |---|---|
-| Win32 API (`pywin32`, `ctypes`) | window enumeration, foreground control, `SendInput` for all simulated input, `PrintWindow` for occlusion-tolerant capture |
-| `mss` | screen capture, used only as the fallback when `PrintWindow` returns nothing usable |
+| Win32 API (`pywin32`, `ctypes`) | window enumeration, foreground control, `SendInput` for all simulated input, `PrintWindow` for occlusion-tolerant capture, low-level keyboard and mouse hooks for the input holds |
+| `mss` | screen capture: the fallback when `PrintWindow` returns nothing usable, and the only path `hover` uses, since `PrintWindow` cannot render another window's tooltip |
 | `Pillow` | all image comparison, cropping, scaling and encoding |
 | `uiautomation` | the UI Automation element tree |
 | `psutil` | process names for window listing |
@@ -387,7 +512,8 @@ Every tool call is appended to a session folder under
 - **The mouse, keyboard and foreground are shared with whoever is at the
   machine.** Input cannot be delivered in the background to the apps this
   server targets (measured against Blender, the Godot editor and Notepad), so
-  a run visibly takes over the desktop while acting. Reading does not.
+  a run visibly takes over the desktop while acting, and hands it back when the
+  action ends. Reading does not take it at all.
 - **A machine-wide keyboard hook is installed once input is sent**, and it sees
   every key event on the computer, not only those going to the target window —
   that is what the mechanism is. It stores nothing and swallows only the
@@ -395,6 +521,11 @@ Every tool call is appended to a session folder under
   process exits. The exposure is real and worth stating plainly: while this
   server is running and has sent input, a bug in it is a bug in the path every
   keystroke on the machine takes.
+- **A machine-wide mouse hook is installed the first time `hover` runs**, and
+  the same statement applies to it: it sees every mouse event on the computer
+  while it exists. It reads only the flags saying *who* sent an event, never
+  the position, and it swallows nothing unless a hover is mid-dwell. If no
+  `hover` is ever called, no mouse hook is ever installed.
 - **Journal frames are screenshots of whatever was on the window**, written
   unencrypted to `%TEMP%`. If the window shows something private, so do they,
   until the folder is pruned five sessions later.
@@ -403,13 +534,25 @@ Every tool call is appended to a session folder under
 
 ## Verification
 
-`tests\smoke.py` drives the real tools against a throwaway Notepad it launches
-and kills, checking each behaviour above that can be checked without a human:
+`tests\smoke.py` drives the real tools against a throwaway Notepad it opens and
+closes, checking each behaviour above that can be checked without a human:
 the journal, the stale-target refusal (both as a predicate against synthetic
 frames and end to end through a real click, including a click in a part of the
 window that was never looked at), the region scoping of "seen", `wait_stable`
 against a window deliberately kept repainting, reading a window while another
 is parked on top of it, and pointer/foreground restoration.
+
+**It touches only windows it opened, and hands the desktop back as it found
+it** — asserted at the end of the run, not assumed. It takes only a window that
+appeared *after* it asked for one, rather than the first one matching the
+process name, and it closes that window by undoing its own typing until the
+document is unmodified and then sending Alt+F4, so there is no save prompt to
+answer. It refuses in both directions: no key is sent at all if the window
+cannot be focused, and the window is left open if it will not go back to
+unmodified. Neither of those existed until the test had leaked **56 Notepad
+windows**, one of which belonged to the person — and killing the process does
+not undo it, because Windows 11 Notepad restores every window it had open the
+next time it starts.
 
 It also checks the two claims made above that are easy to assert and never
 measure: that a crop really is cheaper to send than the whole window (it
@@ -422,6 +565,19 @@ enough to fake.
 The attach/outline behaviour is checked with **another application genuinely in
 front**, not on the freshly-launched target: an attach that stole the desktop
 would look identical to one that did not if the target were already foreground.
+The same setup checks both halves of the foreground promise with **one switch
+as the only difference** — by default the action ends with the other
+application back in front, and with `keep_foreground(true)` it ends with the
+driven window in front — so neither check can pass by accident.
+
+`tests\diag_focus_return.py` covers the hand-back's refusals, which are the part
+that matters and the part a live desktop cannot test reliably. It **creates its
+own two windows** rather than driving a real app: they cannot be left behind,
+and nothing else on the desktop can perturb the reading. An earlier version took
+"the person's window" to be whatever was in the foreground and was measuring the
+console window its own test runner had just opened. Alt+Space on a window of
+one's own also opens a genuine Win32 menu, which no modern app is free to
+reinterpret.
 
 The keyboard block is verified in two halves, neither of which ever blocks the
 real keyboard:
@@ -447,6 +603,42 @@ the first input, that the keyboard is held **during** an action — sampled from
 another thread, because "it was released afterwards" is equally true of a block
 that was never taken — that it is released after, and that switching blocking
 off leaves typing working.
+
+The mouse hold is verified the same way, in halves, and none of them ever pins
+the real pointer for longer than half a second:
+
+- `tests\test_input_guard.py` also drives the pointer hold's decision logic with
+  synthetic events and an injected clock: the lease expiring exactly at its
+  boundary, the 3-second cap applying to a caller who asks for more, the
+  keyboard escape chord vetoing it, another injector being swallowed where the
+  keyboard would let it through, and an exception thrown inside the decision
+  releasing the mouse rather than eating it. It also asserts the negative that
+  matters — that **no pointer coordinate is read anywhere** in the path.
+- `tests\probe_mouse_lock.py` installs a real machine-wide mouse hook and
+  proves the pointer is genuinely **pinned**, not merely hidden from apps: with
+  the hold on, a move to a far corner leaves the cursor where it was. It plays
+  the part of a hand on the mouse with a foreign signature, since every event
+  Python can send is injected and a real hand cannot be scripted. **Stated
+  honestly: the physical-hand path is inferred, not measured.** A hand's events
+  reach the same decision by the same route and differ only in a flag that the
+  decision never reads.
+- `tests\diag_hover.py` drives the real `hover` tool against a window it creates
+  and owns, with a genuine Win32 tooltip attached, so nothing on the desktop is
+  touched and the answer is the same on any machine. It asserts the tooltip is
+  reported with its **exact** text and a client-space rectangle, that it is in
+  the returned image, that the image differs from an off-screen render of the
+  same window (if they matched, hover would be using the capture path that
+  cannot see tooltips), that our own outline is *not* reported as something the
+  app raised, that the pointer came back and both holds were let go, and that
+  nothing was marked as seen. It also hovers an empty spot and checks that no
+  popup is invented.
+
+`tests\probe_overlay_activation.py` asks the outline's foreground claim of the
+window that is **actually on screen**, across three show/hide cycles, and checks
+that it is the same handle the overlay reports. Both halves matter: the earlier
+version of this fix marked a handle that was never displayed, and the
+diagnostic covering it passed anyway, so the claim in this document was false
+for a day while everything looked green.
 
 `tests\diag_*.py` and `tests\spike_background*.py` are diagnostics, not tests:
 they print measurements and assert nothing. They exist because each overturned

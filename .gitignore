@@ -4,6 +4,9 @@ __pycache__/
 .location_cache.json
 @AutomationLog.txt
 
+# Probe output: PNGs written by tests/probe_hover.py to be looked at once
+tests/_hover_probe/
+
 # Excluded: reveals unreleased Nightfall Siege project source/structure
 docs/godot-editor-manual.md
 docs/godot_manual_shots/

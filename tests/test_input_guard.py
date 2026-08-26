@@ -232,6 +232,121 @@ check("the hook was never installed by this test", hook.installed, False)
 check("no hook installed at module level either", input_guard.hook_installed(), False)
 
 
+# --- the pointer hold, for hover ---------------------------------------------
+#
+# Same discipline as above: synthetic events and an injected clock, so a bug in
+# the release logic is a failed assertion rather than a cursor nobody can move.
+# That the swallow *works* is a separate question, and not one a fake struct can
+# answer -- tests/probe_mouse_lock.py installs a real hook and measures it.
+
+from input_guard import (  # noqa: E402
+    LLMHF_INJECTED,
+    MAX_MOUSE_LEASE_SECONDS,
+    MouseGuard,
+    classify_mouse,
+)
+
+print("\n-- telling mouse sources apart (the injected bit is 0x01, not 0x10)")
+check("no injected flag reads as human", classify_mouse(0, 0), HUMAN)
+check("our signature reads as ours",
+      classify_mouse(LLMHF_INJECTED, input_sim.SIGNATURE), OURS)
+check("another injector is not us",
+      classify_mouse(LLMHF_INJECTED, OTHER_TOOL), OTHER_INJECTOR)
+check("the keyboard's injected bit does not mark a mouse event as injected",
+      classify_mouse(LLKHF_INJECTED, input_sim.SIGNATURE), HUMAN)
+
+m_human = {"flags": 0, "extra": 0}
+m_ours = {"flags": LLMHF_INJECTED, "extra": input_sim.SIGNATURE}
+m_other = {"flags": LLMHF_INJECTED, "extra": OTHER_TOOL}
+
+
+def m_decide(g, event, now):
+    return g.decide(event["flags"], event["extra"], now=now)
+
+
+print("\n-- idle: the pointer is nobody's but the person's")
+mg = MouseGuard()
+check("not blocking at rest", mg.blocking(now=0.0), False)
+check("human move passes", m_decide(mg, m_human, 0.0), PASS)
+check("our move passes", m_decide(mg, m_ours, 0.0), PASS)
+check("another tool's move passes", m_decide(mg, m_other, 0.0), PASS)
+
+print("\n-- while held")
+mg = MouseGuard()
+check("take() succeeds", mg.take(1.0, now=0.0), True)
+check("blocking", mg.blocking(now=0.5), True)
+check("the person's move is swallowed", m_decide(mg, m_human, 0.5), SWALLOW)
+check("our own move still gets through -- or hover could not aim",
+      m_decide(mg, m_ours, 0.5), PASS)
+check("another injector is swallowed too, unlike the keyboard",
+      m_decide(mg, m_other, 0.5), SWALLOW)
+
+print("\n-- the lease expires on its own")
+check("still held a moment before", m_decide(mg, m_human, 0.99), SWALLOW)
+check("released at the boundary", m_decide(mg, m_human, 1.0), PASS)
+check("and stays released", mg.blocking(now=1.0), False)
+
+print("\n-- the lease cannot be stretched past the cap")
+mg = MouseGuard()
+mg.take(3600.0, now=0.0)
+check("a caller asking for an hour gets the cap",
+      mg.blocking(now=MAX_MOUSE_LEASE_SECONDS), False)
+check("the cap is a fraction of the keyboard's",
+      MAX_MOUSE_LEASE_SECONDS < input_guard.MAX_LEASE_SECONDS, True)
+
+print("\n-- release() gives it back immediately")
+mg = MouseGuard()
+mg.take(10.0, now=0.0)
+mg.release()
+check("not blocking after release", mg.blocking(now=0.1), False)
+check("the person's move passes again", m_decide(mg, m_human, 0.1), PASS)
+
+print("\n-- the keyboard's escape chord gives the pointer back too")
+vetoed = {"latched": False}
+mg = MouseGuard(veto=lambda: vetoed["latched"])
+mg.take(10.0, now=0.0)
+check("held while nothing is vetoing", m_decide(mg, m_human, 0.1), SWALLOW)
+vetoed["latched"] = True
+check("the veto releases a lease that is already running",
+      m_decide(mg, m_human, 0.2), PASS)
+check("and take() will not start a new one", mg.take(10.0, now=0.3), False)
+check("the real guard is wired to the keyboard's latch",
+      input_guard._mouse_guard._veto(), input_guard.guard().latched_off())
+
+print("\n-- what it refuses to know")
+mg = MouseGuard()
+mg.take(1.0, now=0.0)
+m_decide(mg, m_human, 0.1)
+m_decide(mg, m_human, 0.2)
+m_decide(mg, m_ours, 0.3)
+m_decide(mg, m_other, 0.4)
+check("human moves counted", mg.human_events, 2)
+check("our own moves are not counted as the person's", mg.human_events, 2)
+check("another injector is not counted as the person either", mg.human_events, 2)
+check("nothing on the guard holds a coordinate",
+      any("pt" in k or "pos" in k or "coord" in k or "x" in k.split("_")
+          for k in vars(mg)), False)
+check("the hook struct is read for flags and signature only",
+      "pt" not in {f for f, _ in input_guard.MSLLHOOKSTRUCT._fields_
+                   if f in ("flags", "dwExtraInfo")}, True)
+
+print("\n-- an exception inside decide() must not eat the mouse")
+
+
+class ExplodingMouse(MouseGuard):
+    def decide(self, *a, **kw):
+        raise RuntimeError("bug in the mouse guard")
+
+
+mhook = input_guard.MouseHook(ExplodingMouse())
+ms = input_guard.MSLLHOOKSTRUCT(mouseData=0, flags=0, time=0, dwExtraInfo=0)
+result = mhook._callback(0, 0x0200, __import__("ctypes").pointer(ms))
+check("a throwing mouse guard does not swallow", result != 1, True)
+check("the mouse hook was never installed by this test", mhook.installed, False)
+check("no mouse hook installed at module level either",
+      input_guard.mouse_hook_installed(), False)
+
+
 # --- summary -----------------------------------------------------------------
 
 print(f"\n{len(PASSED)} passed, {len(FAILED)} failed")
