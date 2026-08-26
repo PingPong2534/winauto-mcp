@@ -5,11 +5,10 @@ finished behaviour lives in [SPEC.md](SPEC.md).
 
 ## Doing right now
 
-Idle. The focus-return feature is **finished and documented**; nothing is
-committed yet, so the whole of it is still sitting in the working tree —
-`window_manager.py`, `server.py`, `overlay.py`, `tests\smoke.py`,
-`tests\diag_focus_return.py`, `tests\probe_notepad_lifecycle.py`,
-`docs/SPEC.md`, `README.md`, this file.
+Idle. The focus-return feature is finished, documented and **open as
+[PR #4](https://github.com/PingPong2534/winauto-mcp/pull/4)** on branch
+`focus-return` — 13 files, +1204/−103, not yet reviewed or merged. `master` does
+not have any of it.
 
 **Everything is green:**
 
