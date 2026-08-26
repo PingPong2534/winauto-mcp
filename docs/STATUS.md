@@ -5,112 +5,92 @@ finished behaviour lives in [SPEC.md](SPEC.md).
 
 ## Doing right now
 
-Idle, with three uncommitted doc changes in the working tree — see below.
+Idle. Branch `setup-and-howto-docs`, one commit ahead of the last push: the two
+heap tools below, with `SPEC.md` updated in the same commit. Nothing is running.
+
+The doc work from earlier is committed (`5f38961` — `SETUP.md` and `HOWTOUSE.md`
+at the repo root); the working tree is clean apart from what that commit
+contains.
 
 **[PR #4](https://github.com/PingPong2534/winauto-mcp/pull/4) is merged**
 (`5a82791`, 2026-08-26): the foreground hand-back, `hover` and its pointer hold,
-the overlay fix, and the `smoke.py` Notepad-leak fix are all on `master` now —
-20 files, +2692/−127. There is no open PR.
+the overlay fix, and the `smoke.py` Notepad-leak fix are all on `master` now.
+There is no open PR.
 
 **Everything run is green:**
 
 | | |
 |---|---|
-| `tests\diag_hover.py` | **18/18.** Creates its own window with a real Win32 tooltip on it. |
-| `tests\test_input_guard.py` | **88/88** (was 56). |
+| `tests\probe_heap_diff.py` | **passes** — the new one, numbers below. |
+| `tests\diag_hover.py` | **18/18.** |
+| `tests\test_input_guard.py` | **88/88.** |
 | `tests\probe_overlay_activation.py` | **19/19.** |
 | `tests\probe_mouse_lock.py` | **6/6.** |
-| `tests\diag_focus_return.py` | **18/18, five runs in a row** — it was flaky at 16/18 until the overlay fix below. |
+| `tests\diag_focus_return.py` | **18/18, five runs in a row.** |
 
-`tests\smoke.py` has **not** been run since these changes, on purpose: it
-launches Notepad, which restores the 55 leaked windows (see below). It is the
-one gap in the current green.
+`tests\smoke.py` has **not** been run since the merge, on purpose: it launches
+Notepad, which restores the 56 leaked windows (see below). It is the one gap in
+the current green.
 
 ## Just finished
 
-**Two new documents at the repo root, in English, both uncommitted:**
+**Two new tools — `heap_snapshot(label)` and `heap_diff(before, after)`** — so
+the question "we opened a screen and closed it; what did it leave behind?" can
+be answered by object type, not by watching the working set. Total tool count
+is now **32** (was 30).
 
-- **`SETUP.md`** — installation. Leads with the three-layer evidence that this
-  is Windows-only and macOS is *impossible*, not untested: Windows-only wheels
-  at `pip install`, `ctypes.windll` at import (`server.py:10-35`), and
-  `PrintWindow`/UIA/`WH_*_LL` at run time. Requirements and dependency versions
-  are the ones measured on this machine (Python 3.12.10, mcp 2.0.0, venv 97.9
-  MB). Step 3 is a standalone stdio handshake script with its real output —
-  `protocolVersion: 2024-11-05`, `serverInfo: winauto-mcp`, **`tools: 30`** —
-  so an install can be proved good before any harness is configured. Step 4
-  covers Claude Code CLI, VS Code (`servers` schema, not `mcpServers`), Codex
-  TOML and Claude Desktop; **all four carry an explicit "untested, and here is
-  the evidence why"** marker, because none of them is registered on this
-  machine.
-- **`HOWTOUSE.md`** — all 30 tools with input/output/rules, grouped by what
-  they are for, plus worked patterns and an anti-pattern table. The three rules
-  that explain most surprises are stated up front: coordinates are
-  client-relative; a click is refused unless you have looked at *that part* of
-  the window; the machine belongs to the person at it. It spells out which
-  calls do and do not count as having looked — `wait_stable`, `hover` and
-  `replay_frame` deliberately do not.
+- **`heap.py`** wraps `dotnet-gcdump` (a separately-installed .NET SDK global
+  tool, not a Python dependency). `attach_window` now records the owning pid —
+  the heap tools need it *after* the window may already be gone, which is
+  exactly the case a leak hunt cares about — and clears any held snapshots, so
+  a diff can never compare two different programs.
+- **Why gcdump and not memory size**: .NET does not hand heap segments back to
+  the OS, so working set stays high with nothing leaking and stays flat while
+  leaking. gcdump induces a gen2 blocking GC and counts only survivors.
 
-**No absolute paths in any of the three docs.** Every install and verification
-command is now relative to the repo root. The exception is stated rather than
-hidden: a harness launches the server from a working directory you do not
-control, so its config file genuinely needs a full path — those blocks use an
-`<install-dir>` placeholder and the docs show `(Resolve-Path .).Path` to print
-it, or expand it inline for the `claude mcp add` form.
+**Four things were measured before the code was written, and each changed it:**
 
-**`README.md` corrected**: its Codex block said `command = 'K:\winauto-mcp\...'`
-and there is no `K:` drive, so anyone who copied it got a server that never
-loaded. Setup and Register now use relative commands and the placeholder, and
-Setup points at the two new files. One full path remains in the repo, in the
-ZiiDMS agent-usage note at the end of the README — a launcher under a DmsEnv
-repo folder whose name carries a per-machine hash. It is a different project's
-path, not this one's, and cannot be relativized meaningfully; left as it was
-rather than mangled.
+- **The report's first column is per-object size, not the row total.** Summing
+  (per-object × count) over every row came to 7,441,674 bytes against the
+  9,816,966 the report's own header claims — **75.8%**. So counts are exact and
+  **byte figures are approximate and are never summed** into a total.
+- **A type can appear on several rows**, split by size bucket. `System.String`
+  came back as three rows of 4, 25 and 57,406; **30 of 1,882 types** were split.
+  Rows are aggregated by type name before anything is compared.
+- **`bytes_per_obj` comes from the row with the most instances**, not the
+  largest. Taking the largest was written first and caught in verification: it
+  reported every `System.String` as 28,130 bytes when 57,406 of 57,435 are 22.
+- **There is a real noise floor.** Two snapshots of a process doing nothing but
+  `Start-Sleep` differ by **4,217 objects across 255 types** — taking a snapshot
+  itself makes the runtime materialize reflection metadata. Both tools say so in
+  their own output; a single before/after pair is not a leak list.
 
-**`hover(x, y, dwell_ms=700, force=False)`** — rest the pointer somewhere, wait,
-photograph what the app shows, put the pointer back. Four things were measured
-first and each one changed the design:
+**Cost, measured**: collect against a 100 MB heap took 1.58 s wall-clock, of
+which the target was actually *stopped* for **24 ms**. Each dump is ~3 MB on
+disk in the journal session folder.
 
-- **A screen grab, not `PrintWindow`.** A tooltip is its own top-level window
-  and `PrintWindow` renders one window, so the usual capture path returns a
-  picture with no tooltip in it. Confirmed by looking at both PNGs.
-- **The pointer is genuinely pinned**, not merely hidden from apps: a
-  `WH_MOUSE_LL` hook returning 1 leaves the cursor where it was when a move to a
-  far corner is sent. `ClipCursor` was rejected — it is system-wide state owned
-  by no process, so a crash mid-hold would trap a stranger's pointer; Windows
-  tears a dead process's hooks down for free.
-- **Popup text is read through UIA, not transcribed from pixels** — a tooltip's
-  `Name` is exactly the string the app set, so a caller can assert on it.
-- **A hover image marks nothing as seen.** I had it marking the frame as looked
-  at until the two capture paths were compared: outside the tooltip they differ
-  on 0.87 % of pixels, worst channel delta 245, spread across 100 rows and not
-  explained by edges. Unexplained disagreement plus a picture of a transient is
-  not a basis for aiming a click, so `hover` now tells callers to `screenshot()`
-  first.
+**`tests\probe_heap_diff.py`** proves the whole chain against a known answer: it
+launches its own PowerShell target, has it hold 20,000 `System.Uri`, snapshots,
+tells it to allocate 20,000 more, snapshots again, and asserts the delta.
+Result: `System.Uri +20,000` (56 bytes each) — ranked **#3 of 59 types that
+grew**, with the biggest noise entry at +674, so the signal sat 30× above it. It
+also asserts `attach_window` recorded the right pid, and kills the target.
 
-**Yesterday's overlay fix was wrong and had been believed for a day.** It set
-`WS_EX_NOACTIVATE` on the handle from Tk's `wm_frame()`, which is a *different
-window* — measured with the outline on screen, the visible `TkTopLevel` had the
-style clear. The 18/18 that shipped it was luck, and `diag_focus_return.py` went
-back to 16/18 today with the outline holding the foreground again. What works:
-`winfo_id()` walked up with `GA_ROOT`, **on the Tk thread**, which resolves the
-right handle even while the window is withdrawn — so the style is applied before
-the window is ever mapped and there is no first showing to race.
-`tests\probe_overlay_activation.py` now asks this of the window actually on
-screen, across three show/hide cycles.
-
-**An honest gap in `probe_mouse_lock.py`:** it reports `genuinely-human events
-seen: 0`. Every event Python can send is injected, so a physical hand cannot be
-scripted; the probe stands in for one with a foreign signature. The real-hand
-path is inferred — it reaches the same decision by the same route and differs
-only in a flag the decision never reads.
+**Not done, and not asked for yet:** no run against the real Uno application —
+none was running this session. `dotnet-dump` (for SOS `gcroot`, i.e. *why* a
+surviving object is still referenced) is not installed; that is the natural next
+tool once a leaking type has a name.
 
 ## Waiting on the user
 
+- **`SETUP.md` and `HOWTOUSE.md` now say "30 tools" and are stale at 32.**
+  `SETUP.md`'s figure came from a real stdio handshake (`tools: 30`), and
+  `HOWTOUSE.md` documents all 30 individually — so fixing this means re-running
+  the handshake and writing two entries, not editing a number. Left for a
+  separate commit rather than smuggled into this one.
 - **`smoke.py` has never run against what is now on `master`.** It was 109/109
   at the first of the three merged commits and has not been run since, because
-  it launches Notepad (below). So the merged tree's end-to-end suite is
-  unverified — everything else is green, but that gap is real and merging did
-  not close it.
+  it launches Notepad (below).
 - **Notepad's saved session still holds 56 windows.** The desktop is clear, but
   `LocalState\TabState` under `Microsoft.WindowsNotepad_8wekyb3d8bbwe` still has
   **56 files (5 KB)**, and the next launch of Notepad by anything restores them
@@ -132,8 +112,10 @@ only in a flag the decision never reads.
   carries ~13 lines of unrelated in-flight work. Options put to the user: (1)
   add `node_modules/` to `.gitignore` and commit everything (my
   recommendation), (2) commit only the two `development/*.md` files, (3) leave
-  it. Four findings belong in that doc and are not yet written there: menu mode
+  it. Five findings belong in that doc and are not yet written there: menu mode
   (`GUI_INMENUMODE`) is sticky per thread and never clears; Win11 Notepad puts
   every window in one process *and* restores them after a kill; a Tk overlay
   needs `WS_EX_NOACTIVATE` on the `winfo_id()`+`GA_ROOT` window, resolved on the
-  Tk thread, before first map; and `PrintWindow` cannot capture tooltips.
+  Tk thread, before first map; `PrintWindow` cannot capture tooltips; and
+  gcdump's report column is per-object size with types split across size
+  buckets.

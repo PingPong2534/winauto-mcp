@@ -141,7 +141,9 @@ asserted of the window actually visible, across repeated show/hide cycles.
   moment input requires it. `take_control=true` raises it immediately instead,
   for when a person should see which window is about to be driven. Either way
   it starts a **new journal session**, discarding the record of the previous
-  one from memory, and clears any memory of what the caller has looked at.
+  one from memory, clears any memory of what the caller has looked at, and
+  discards any heap snapshots, which describe a process rather than a window.
+  It also records the owning process id, which is what the heap tools read.
   Rejects a handle that is not a window.
 - **Cost** Deferring the raise adds nothing, because every input path raised
   the window itself already — it was being paid twice. Measured: attach 6.0 ms
@@ -226,6 +228,59 @@ asserted of the window actually visible, across repeated show/hide cycles.
 - **Rules** Polls the UI Automation tree for an element whose name matches
   (exact, then substring, case-insensitive); raises on timeout. Useless
   against apps with no UIA tree — use `wait_stable` there.
+
+## Reading the managed heap
+
+**.NET processes only** — WinForms, WPF, WinUI/Uno, anything on CoreCLR. A
+native app has no managed heap to read and these two tools say so rather than
+guessing.
+
+**Why not just read the process's memory size.** .NET does not hand heap
+segments back to Windows when objects die, so working set stays high with
+nothing leaking, and can stay flat while something leaks steadily. Object
+counts taken after a forced collection answer the question that memory size
+only appears to.
+
+### `heap_snapshot(label)`
+- **Input** a name to file the result under. Reusing a name replaces it.
+- **Output** JSON: the label, the pid read, how many live objects and bytes the
+  heap holds, how many distinct types, where the dump was written, and which
+  labels are currently held.
+- **Rules** Forces a **full blocking collection** and counts only what survived
+  it, so a type still present afterwards is genuinely still referenced. Fails,
+  saying which, when no window is attached, when the attached window's process
+  has exited, when the process is not .NET, or when the collector is not
+  installed. Snapshots belong to one process: attaching to a window **discards
+  every held snapshot**, since comparing two programs would report the
+  difference between them as growth.
+- **Cost** The target is **stopped for the length of the collection** — measured
+  at 24 ms against a 100 MB heap, and it scales with heap size. The call itself
+  takes around 1.6 s, most of it outside the pause. Each snapshot writes a dump
+  of roughly 3 MB to the journal's session folder, pruned with it.
+
+### `heap_diff(before, after, top=25)`
+- **Output** JSON: the types that gained instances, biggest gain first, each
+  with its before and after count, the gain, roughly what one instance costs,
+  its assembly, and whether the type is new; plus how many types grew in total
+  and the change in overall object count.
+- **Rules** Rejects a label that was never taken, listing the ones held.
+- **Counts are exact; bytes are not.** The count for a type deliberately
+  allocated 20,000 times came back as exactly 20,000 more than before. The byte
+  column, by contrast, is the size of *one* object averaged within a size
+  bucket: summing it across every row accounted for 7,441,674 of the
+  9,816,966 bytes the same report claimed for the heap, so no byte total is
+  derived from it and only a per-instance figure is offered.
+- **Caveat that changes how the output must be read** A single before/after
+  pair does not identify a leak. Two snapshots of a process doing **nothing but
+  sleeping** differed by 4,217 objects across 255 types, because collecting a
+  snapshot itself makes the runtime materialize reflection metadata —
+  `RuntimeParameterInfo`, `RuntimeMethodInfo`, `Signature` and strings are the
+  usual names in that drift. That is the noise floor of the measurement, which
+  is why `types_that_grew` is reported next to the list. The signal that
+  survives it is **repetition**: run the same open/close cycle five or more
+  times, snapshot each round, and look for a type whose count rises by the same
+  amount every round. A recognizable name — a page, a view model, a record
+  class — appearing at all is worth more than any number in one pair.
 
 ## Driving the window
 
@@ -498,7 +553,8 @@ Every tool call is appended to a session folder under
 | `mss` | screen capture: the fallback when `PrintWindow` returns nothing usable, and the only path `hover` uses, since `PrintWindow` cannot render another window's tooltip |
 | `Pillow` | all image comparison, cropping, scaling and encoding |
 | `uiautomation` | the UI Automation element tree |
-| `psutil` | process names for window listing |
+| `psutil` | process names for window listing, and whether a pid is still alive |
+| `dotnet-gcdump` | the managed-heap object counts, via a forced collection. A .NET SDK global tool, installed separately (`dotnet tool install -g dotnet-gcdump`) and **not** part of this server's Python dependencies; only the heap tools need it, and they are the only ones that fail without it |
 | `mcp` | the MCP server transport |
 | `tkinter` | the tracking/highlight overlay |
 
@@ -529,6 +585,14 @@ Every tool call is appended to a session folder under
 - **Journal frames are screenshots of whatever was on the window**, written
   unencrypted to `%TEMP%`. If the window shows something private, so do they,
   until the folder is pruned five sessions later.
+- **A heap snapshot stops the app it measures.** Not a read from outside: it
+  forces a full collection in the target and the target does not run until that
+  finishes — 24 ms against a 100 MB heap, more against a bigger one. It is the
+  only tool here that perturbs the app without being asked to change anything,
+  which is worth knowing before one is taken against something timing-sensitive
+  mid-animation. Each snapshot also leaves a ~3 MB dump in the session folder;
+  those name every type on the heap, which for an application's own classes is
+  a description of its internals, and they are pruned with the journal.
 - `.location_cache.json` next to the server is written and pruned by
   `remember_location`/`recall_location`.
 
@@ -632,6 +696,16 @@ the real pointer for longer than half a second:
   app raised, that the pointer came back and both holds were let go, and that
   nothing was marked as seen. It also hovers an empty spot and checks that no
   popup is invented.
+
+`tests\probe_heap_diff.py` drives `heap_snapshot`/`heap_diff` end to end against
+a target that leaks a **known** amount: it launches its own PowerShell process,
+has it hold 20,000 objects of one type, tells it to allocate 20,000 more between
+the two snapshots, and kills it afterwards. The number is the assertion. A probe
+checking only that "some types grew" would pass against a tool reporting nothing
+but the runtime's own churn, which is thousands of objects by itself; measured,
+the deliberate 20,000 came back as exactly 20,000 while the largest noise entry
+in the same run was 674. It also asserts that attaching recorded the target's
+pid, since every heap call depends on that one value being right.
 
 `tests\probe_overlay_activation.py` asks the outline's foreground claim of the
 window that is **actually on screen**, across three show/hide cycles, and checks
