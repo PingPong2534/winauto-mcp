@@ -93,6 +93,23 @@ Windows-only. Built and tested against Python 3.12 on Windows 11.
   poll compares against what is already drawn and touches Tk only on a real
   change: measured 1 repaint over 3 idle seconds, against ~20 before, while a
   window that does move still updates (`tests\diag_overlay_paint.py`).
+- **The keyboard is shared too, and the tool knows whose keystroke is whose**:
+  every event this server sends carries a signature Windows delivers untouched,
+  so a key event can be attributed to the person, to us, or to a third
+  injector. (Windows' own "injected" flag cannot do this — an on-screen
+  keyboard, a remote-desktop session and another automation tool all set it.)
+  While an action runs, the person's keys are held out so their typing cannot
+  land in the middle of ours; ours pass the same block. **Nothing is stored** —
+  not the key, not the character, only a count of "a human key happened" and
+  when. A hook that kept key codes would be a keylogger, and the only honest
+  way to promise it is not one is for the data never to exist.
+- **The keyboard always comes back**, by five routes that do not depend on each
+  other: the block is a **lease** that expires by itself within 20 seconds with
+  no release call and no working server needed; **three Escapes** inside 1.5 s
+  release it *and* latch it off until `release_keyboard()`; the **mouse is
+  never blocked**; Windows discards a hook that is too slow and all hooks of a
+  process that exits; and Ctrl+Alt+Del is beneath any hook by OS design.
+  Nothing is installed at all until the first input is sent.
 
 ## Tools
 
@@ -113,11 +130,13 @@ Windows-only. Built and tested against Python 3.12 on Windows 11.
 | `hotkey(keys)` | Press a chord together, e.g. `["ctrl", "shift", "p"]` for Ctrl+Shift+P |
 | `scroll(x, y, clicks, keep_cursor)` | Mouse-wheel scroll at client-relative coordinates (positive = up, negative = down) |
 | `drag(x1, y1, x2, y2, button, force, keep_cursor)` | Drag from one point to another -- moves through intermediate points, not a teleport, since many apps only recognize a drag if the mouse visibly moves while held. Same stale-target refusal as `click` |
-| `run_steps(steps, delay_ms, stop_on_error)` | Run up to 40 actions in one call, in order, with `delay_ms` between them: `click`, `drag`, `scroll`, `type`, `key`, `hotkey`, `click_element`, `wait`, `wait_stable`, `capture` (returns a crop mid-run), `check` (stops the run if a region didn't change / did change as predicted). The whole script is validated before any step runs, and each step is journaled with its own before/after frames. **Only step 1 is guarded against a stale coordinate** |
+| `run_steps(steps, delay_ms, stop_on_error, stop_if_user_types)` | Run up to 40 actions in one call, in order, with `delay_ms` between them: `click`, `drag`, `scroll`, `type`, `key`, `hotkey`, `click_element`, `wait`, `wait_stable`, `capture` (returns a crop mid-run), `check` (stops the run if a region didn't change / did change as predicted). The whole script is validated before any step runs, and each step is journaled with its own before/after frames. Holds the person's keyboard for the whole script and stops if they press a key anyway. **Only step 1 is guarded against a stale coordinate** |
 | `wait_stable(timeout, settle_ms, interval, threshold, region)` | Poll until the window (or `region` of it) stops repainting for `settle_ms`. Never called automatically -- reports timing, not pixels, so take a fresh screenshot after |
 | `history(last, tool_name, failures_only)` | The steps taken so far this session, from the journal, with their arguments, results and which frames were kept |
 | `replay_frame(seq, which)` | The before/after screen image stored for step `seq` -- evidence for "what did it look like then?", downscaled, never a coordinate source |
-| `release_control()` | Put the window the person was using back in front and hide the tracking outline. Reading the attached window keeps working from behind; the next action takes it again by itself |
+| `release_control()` | Put the window the person was using back in front, hide the tracking outline and release the keyboard. Reading the attached window keeps working from behind; the next action takes it again by itself |
+| `keyboard_status()` | Whether the block is on, how much lease is left, whether the person latched it off with three Escapes, and whether any human key event has happened -- a count and a time, **never which keys** |
+| `release_keyboard(enable_blocking=True)` | Hand the keyboard back now and clear the triple-Escape latch (the only thing that clears it). `enable_blocking=false` switches blocking off for the rest of the session |
 | `locate_in_region(x1, y1, x2, y2, threshold)` | Find exact click coordinates by pixel contrast within a small region -- returns the tight content bbox and its center. Use instead of eyeballing coordinates off a displayed screenshot crop, which has repeatedly been wrong by 50-150+ px (displayed crops can be rescaled in ways that don't map back to real source pixels) |
 | `snapshot()` | Store the current screenshot as a reference point |
 | `diff_since_snapshot(threshold, region)` | Compare the current screen to the last `snapshot()`, return the bounding box of changed pixels or "no change detected" -- objective confirmation an action had a visible effect, instead of eyeballing two screenshots side by side. Pass `region` to narrow a sprawling box down (see Known limitations) |
@@ -217,6 +236,18 @@ claude mcp add winauto -- F:\tools\winauto-mcp\.venv\Scripts\python.exe F:\tools
   before/after frames, so a script that goes wrong is reconstructable after the
   fact with `history()`/`replay_frame()` — that is the recovery path, not
   prevention.
+- **Blocking the keyboard means a machine-wide hook.** Once the server sends
+  its first input it installs a low-level keyboard hook, and such a hook sees
+  every key event on the computer — not just those going to the target window.
+  That is the mechanism; there is no window-scoped version of it. It stores
+  nothing and swallows only the person's keys, only while an action is running,
+  and it is gone when the process exits. But the exposure is real and worth
+  stating rather than burying: while this server is running and has sent input,
+  a bug in it is a bug in the path every keystroke on the machine takes. That
+  is why the decision logic is kept trivial and is tested against synthetic
+  events, why a thrown exception inside it passes the key through rather than
+  eating it, and why `release_keyboard(enable_blocking=false)` exists to switch
+  the whole thing off. Ctrl+Alt+Del cannot be blocked by it in any case.
 - **Looking at a region only counts for that region.** After
   `capture_region(toolbar)`, clicking in the toolbar goes through and clicking
   anywhere else in the window is refused with the list of rectangles actually

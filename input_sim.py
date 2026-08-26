@@ -7,6 +7,7 @@ like real hardware input to the target app -- this is what lets Unicode
 """
 
 import ctypes
+import ctypes.wintypes
 import time
 
 import win32api
@@ -16,7 +17,14 @@ from window_manager import bring_to_foreground
 
 # --- ctypes SendInput structures -------------------------------------------------
 
-PUL = ctypes.POINTER(ctypes.c_ulong)
+# dwExtraInfo is ULONG_PTR -- a VALUE the sender chooses, which Windows carries
+# through to GetMessageExtraInfo() and to low-level hooks untouched. It was
+# declared here as POINTER(c_ulong) and passed ctypes.pointer(...), which is a
+# widespread copy-paste error: it compiles, input works, and every event goes
+# out stamped with the address of a temporary instead of a value -- a different
+# number each call. That made the field useless for its one purpose, telling
+# our own input apart from the person's.
+ULONG_PTR = ctypes.wintypes.WPARAM
 
 
 class KeyBdInput(ctypes.Structure):
@@ -25,7 +33,7 @@ class KeyBdInput(ctypes.Structure):
         ("wScan", ctypes.c_ushort),
         ("dwFlags", ctypes.c_ulong),
         ("time", ctypes.c_ulong),
-        ("dwExtraInfo", PUL),
+        ("dwExtraInfo", ULONG_PTR),
     ]
 
 
@@ -36,7 +44,7 @@ class MouseInput(ctypes.Structure):
         ("mouseData", ctypes.c_ulong),
         ("dwFlags", ctypes.c_ulong),
         ("time", ctypes.c_ulong),
-        ("dwExtraInfo", PUL),
+        ("dwExtraInfo", ULONG_PTR),
     ]
 
 
@@ -72,7 +80,12 @@ WHEEL_DELTA = 120
 KEYEVENTF_UNICODE = 0x0004
 KEYEVENTF_KEYUP = 0x0002
 
-_EXTRA = ctypes.c_ulong(0)
+# Stamped on every event this process sends, so a keystroke or click can be
+# attributed later. Windows' own LLKHF_INJECTED flag only says "some process
+# injected this" -- an on-screen keyboard, a remote desktop session or another
+# automation tool all set it. This says it was US. Arbitrary constant; it only
+# has to be unlikely to collide with another injector's choice.
+SIGNATURE = 0x7A170001
 
 
 def _send(*inputs: Input):
@@ -82,17 +95,17 @@ def _send(*inputs: Input):
 
 
 def _mouse_input(dx, dy, flags, mouse_data=0):
-    return Input(type=INPUT_MOUSE, ii=InputUnion(mi=MouseInput(dx, dy, mouse_data, flags, 0, ctypes.pointer(_EXTRA))))
+    return Input(type=INPUT_MOUSE, ii=InputUnion(mi=MouseInput(dx, dy, mouse_data, flags, 0, SIGNATURE)))
 
 
 def _key_unicode_input(char_code, key_up=False):
     flags = KEYEVENTF_UNICODE | (KEYEVENTF_KEYUP if key_up else 0)
-    return Input(type=INPUT_KEYBOARD, ii=InputUnion(ki=KeyBdInput(0, char_code, flags, 0, ctypes.pointer(_EXTRA))))
+    return Input(type=INPUT_KEYBOARD, ii=InputUnion(ki=KeyBdInput(0, char_code, flags, 0, SIGNATURE)))
 
 
 def _key_vk_input(vk_code, key_up=False):
     flags = KEYEVENTF_KEYUP if key_up else 0
-    return Input(type=INPUT_KEYBOARD, ii=InputUnion(ki=KeyBdInput(vk_code, 0, flags, 0, ctypes.pointer(_EXTRA))))
+    return Input(type=INPUT_KEYBOARD, ii=InputUnion(ki=KeyBdInput(vk_code, 0, flags, 0, SIGNATURE)))
 
 
 def _screen_to_absolute(x, y):

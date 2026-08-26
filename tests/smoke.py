@@ -50,6 +50,36 @@ def image_bytes(out: str) -> int:
     return 0
 
 
+def calculator_pids():
+    """PIDs of the real Calculator app right now.
+
+    calc.exe is a stub: it hands off to a packaged CalculatorApp.exe with a
+    different PID and exits. So Popen(["calc.exe"]).kill() kills something that
+    has already gone, and the window it opened stays on the desktop forever --
+    this test leaked two Calculator windows per run until it was noticed at 27.
+    Same PID-handoff trap as notepad.exe above, which is why the Notepad window
+    here is matched by process name rather than by PID.
+    """
+    out = subprocess.run(
+        ["tasklist", "/FI", "IMAGENAME eq CalculatorApp.exe", "/FO", "CSV", "/NH"],
+        capture_output=True, text=True,
+    ).stdout
+    return {int(line.split('","')[1]) for line in out.splitlines() if line.startswith('"')}
+
+
+def close_calculators(before, timeout=8.0):
+    """Close only the Calculator processes that appeared since `before` --
+    never one the person already had open."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        new = calculator_pids() - before
+        if new:
+            break
+        time.sleep(0.3)
+    for pid in calculator_pids() - before:
+        subprocess.run(["taskkill", "/PID", str(pid), "/F"], capture_output=True)
+
+
 def check(label, condition, detail=""):
     print(f"  [{'PASS' if condition else 'FAIL'}] {label}{(' -- ' + detail) if detail else ''}")
     return bool(condition)
@@ -77,6 +107,15 @@ def main():
         failures += not check("attach_window succeeded", not err, out[:120])
         failures += not check("reports a journal session", "journal session" in out)
         time.sleep(0.4)
+
+        # Checked here because it can only be checked once: a session that has
+        # never sent input must not have a machine-wide keyboard hook in it.
+        print("\n-- nothing is watching the keyboard until something is typed")
+        err, out = call("keyboard_status")
+        kb = json.loads(out) if not err else {}
+        failures += not check("no hook installed yet", kb.get("watching") is False, out[:160])
+        failures += not check("and nothing is blocked", kb.get("blocking") is False)
+        failures += not check("no human keystroke seen", kb.get("human_key_events") == 0)
 
         print("\n-- capture marks the frame as seen")
         err, out = call("screenshot")
@@ -416,6 +455,96 @@ def main():
             str(sorted(script_records[0]))[:160],
         )
 
+        print("\n-- the keyboard is held while an action runs, and given back after")
+        # By now several clicks have happened, so the hook must have installed
+        # itself along the way rather than at import.
+        err, out = call("keyboard_status")
+        kb = json.loads(out) if not err else {}
+        failures += not check("the first input installed the hook", kb.get("watching") is True, out[:160])
+        failures += not check("but nothing is holding it now", kb.get("blocking") is False, out[:160])
+        failures += not check("and no human key was ever seen in this run",
+                              kb.get("human_key_events") == 0, out[:160])
+
+        # Sampling from another thread is the only way to see the state *during*
+        # a call: afterwards it is released, and "it was released afterwards" is
+        # equally true of a block that was never taken.
+        seen_blocking = []
+
+        def sample():
+            for _ in range(40):
+                seen_blocking.append(server.input_guard.guard().blocking())
+                time.sleep(0.05)
+
+        watcher = threading.Thread(target=sample, daemon=True)
+        watcher.start()
+        err, out = call("run_steps", steps=[{"do": "wait", "ms": 900},
+                                            {"do": "type", "text": "K"}])
+        watcher.join()
+        failures += not check("it really was held while the script ran",
+                              any(seen_blocking), f"{sum(seen_blocking)}/{len(seen_blocking)} samples blocked")
+        failures += not check("and released once the script returned",
+                              not server.input_guard.guard().blocking())
+        failures += not check("the script itself still typed fine", not err, out[:120])
+
+        print("\n-- a script stops when the person reaches for the keyboard")
+        # Nobody types during a test, and a real keypress cannot be
+        # manufactured -- Windows sets the injected flag on anything SendInput
+        # delivers, and clearing it would need a driver. So the event is handed
+        # to the same guard.decide() the hook calls, from a thread, while a
+        # script is running. Everything downstream of that call is the real
+        # path: the counter, the stop, and the reported reason.
+        def press_as_human():
+            time.sleep(0.5)
+            server.input_guard.guard().decide(flags=0, extra=0, vk=0x41)
+
+        threading.Thread(target=press_as_human, daemon=True).start()
+        err, out = call("run_steps", steps=[{"do": "wait", "ms": 900},
+                                            {"do": "type", "text": "SHOULD NOT RUN"},
+                                            {"do": "type", "text": "NOR THIS"}])
+        rep = json.loads(out.splitlines()[0]) if not err else {}
+        failures += not check("the script stopped at the step they typed during",
+                              rep.get("stopped_at_step") == 1, out[:200])
+        failures += not check("with the rest abandoned",
+                              rep.get("performed") == 1 and rep.get("of") == 3)
+        failures += not check("and says why, in words that name the person",
+                              "person" in rep.get("stopped_because", ""),
+                              rep.get("stopped_because", "<missing>")[:120])
+        failures += not check("the keystroke was counted",
+                              json.loads(call("keyboard_status")[1])["human_key_events"] >= 1)
+        failures += not check("and the keyboard was still given back afterwards",
+                              not server.input_guard.guard().blocking())
+
+        # ...and the same interruption, on a single action rather than a script
+        threading.Thread(target=press_as_human, daemon=True).start()
+        err, out = call("run_steps", steps=[{"do": "wait", "ms": 900}],
+                        stop_if_user_types=False)
+        rep = json.loads(out.splitlines()[0]) if not err else {}
+        failures += not check("stop_if_user_types=false runs the script anyway",
+                              rep.get("stopped_at_step") is None and rep.get("performed") == 1,
+                              out[:200])
+
+        print("\n-- handing the keyboard back, and turning blocking off")
+        err, out = call("release_keyboard", enable_blocking=False)
+        failures += not check("release_keyboard reports blocking is off",
+                              not err and "OFF" in out, out[:140])
+        seen_blocking = []
+        watcher = threading.Thread(target=sample, daemon=True)
+        watcher.start()
+        before_typing = server.grab_window(hwnd)
+        call("type_text", text="LLLLLLLLLL")
+        watcher.join()
+        time.sleep(0.4)
+        failures += not check("with blocking off, an action never takes the keyboard",
+                              not any(seen_blocking), f"{sum(seen_blocking)} samples blocked")
+        # Not "the call returned no error" -- it would return no error if the
+        # keystrokes went nowhere. The characters have to appear on screen.
+        failures += not check(
+            "and the characters still reached the app",
+            server.changed_bbox(before_typing, server.grab_window(hwnd),
+                                threshold=10, region=(0, 60, 800, 500)) is not None,
+        )
+        call("release_keyboard", enable_blocking=True)
+
         print("\n-- history()")
         err, out = call("history", last=100)
         failures += not check("history returned", not err, out[:80] if err else "")
@@ -474,6 +603,7 @@ def main():
         # Handing the desktop back has to be asked for, and has to actually
         # work: a run that leaves the person's window buried is the complaint
         # this is here to answer.
+        calcs_before = calculator_pids()
         their_window = subprocess.Popen(["calc.exe"])
         try:
             # Take whatever ends up in front as "their window" rather than
@@ -539,7 +669,8 @@ def main():
             failures += not check("release_control puts the outline away too",
                                   overlay._tracked_hwnd is None)
         finally:
-            their_window.kill()
+            their_window.kill()  # the stub, if it is even still alive
+            close_calculators(calcs_before)
             time.sleep(0.5)
 
         print("\n-- reading a window that is covered by another one")
@@ -552,6 +683,7 @@ def main():
         import win32gui  # noqa: PLC0415
 
         visible = server.grab_window(hwnd)
+        calcs_before = calculator_pids()
         cover = subprocess.Popen(["calc.exe"])
         cover_hwnd = None
         try:
@@ -596,7 +728,8 @@ def main():
             failures += not check("and it is not a blank frame",
                                   len(set(painted.resize((64, 64)).getdata())) > 20)
         finally:
-            cover.kill()
+            cover.kill()  # the stub, if it is even still alive
+            close_calculators(calcs_before)
             time.sleep(0.5)
 
         print("\n-- session folder on disk")

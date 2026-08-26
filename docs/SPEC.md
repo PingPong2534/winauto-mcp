@@ -17,6 +17,41 @@ running window at a time and lets a caller read it and drive it.
 | **Errors** | A tool that cannot do what was asked raises; the client sees an error result. Nothing fails silently, and no tool returns a success string for an action it did not perform. |
 | **Journal** | Every tool call is recorded (below), including calls that failed and actions that were refused. |
 | **What counts as "seen"** | The server tracks what the caller has actually been *shown*, as a list of views, each covering a rectangle of the window. Looking at the whole window counts for the whole window; looking at part of it counts for **that part only**. A newer view supersedes any older view it fully contains, and only the most recent 8 are kept. The stale-target guard asks "which view covers this point, and has that view's area changed since?" — so a partial look can never certify a coordinate elsewhere on screen. |
+| **Whose keystroke is whose** | Every key and mouse event this server sends carries a signature that Windows delivers untouched. A key event is attributed to the **person** only when Windows says nothing injected it; to **this server** when it carries our signature; and to **some other injector** otherwise. Windows' own "injected" flag alone cannot answer this — an on-screen keyboard, a remote-desktop session and another automation tool all set it. |
+
+## Sharing the keyboard with the person at the machine
+
+Automation and the person share one physical keyboard. While an action runs,
+the person's keystrokes are **held out** of the app so they cannot land in the
+middle of what is being typed; the server's own keystrokes pass the same block
+because they are signed.
+
+**What is recorded: nothing.** Not the key, not the character, not which keys —
+only a running count of "a human key event happened" and when the last one was.
+A machine-wide keyboard hook that kept key codes would be a keylogger; the only
+honest way to promise it is not one is for the data never to exist. Nothing in
+the journal, the status output, or on disk can reconstruct anything typed by
+anyone.
+
+**The keyboard always comes back.** No single failure can strand it, because
+the ways out do not depend on each other:
+
+| | |
+|---|---|
+| **It is a lease, not a lock** | The block expires by itself after at most 20 seconds. No release call, no cooperating caller and no working server is needed for the keyboard to return. |
+| **Three Escapes** | Three presses of Esc within 1.5 seconds release it immediately **and latch it off**, so nothing takes it again until `release_keyboard()` is called. Someone reaching for this is having a problem; silently re-blocking them would be the worst possible response. |
+| **The mouse is never blocked** | A held keyboard with a working mouse is an inconvenience. Blocking both would be locking someone out of their own machine. |
+| **Windows removes it** | Windows discards a keyboard hook whose handler is too slow, and discards all of a process's hooks when it exits. A hung or killed server therefore heals by itself. |
+| **Ctrl+Alt+Del** | Handled by Windows beneath any hook and cannot be blocked here, by design of the OS. |
+
+**Nothing watches the keyboard until input is sent.** The hook is installed on
+the first action that drives the window, not at startup, so a session that only
+reads screens never installs one.
+
+**The person's attempt to type is reported.** An action that ran while they
+pressed a key returns its normal result plus a note that N key events were held
+out, and `run_steps` stops at that step by default. Someone reaching for the
+keyboard mid-run wants the machine more than the script does.
 
 ## Reading the screen
 
@@ -125,7 +160,9 @@ running window at a time and lets a caller read it and drive it.
 ## Driving the window
 
 Sending input **requires the window in front**, and uses the one real mouse
-and keyboard. Every input tool raises the window if it is not already there.
+and keyboard. Every input tool raises the window if it is not already there,
+and holds the person's keyboard out for as long as it runs (above), returning a
+note on its normal result if they pressed a key while it did.
 
 ### `click(x, y, button="left", double=False, modifiers=None, force=False, keep_cursor=False)`
 - **Output** on success, a line stating what was clicked.
@@ -185,6 +222,23 @@ and keyboard. Every input tool raises the window if it is not already there.
   the caller's job not to call this mid-interaction, because a menu opened by
   the previous click closes when its window loses focus.
 
+### `keyboard_status()`
+- **Output** JSON: whether the block is on, how many seconds of lease remain,
+  whether the person latched it off with three Escapes, how many human key
+  events have occurred this session, how long ago the last one was, the reasons
+  the last few blocks ended, whether a hook is installed at all, and whether
+  blocking is enabled.
+- **Rules** Reports a **count and a time, never a key**. Installs nothing:
+  asking before any input has been sent correctly answers that nothing is
+  watching.
+
+### `release_keyboard(enable_blocking=True)`
+- **Output** confirmation, stating whether actions will hold the keyboard again.
+- **Rules** Releases any current block and clears the triple-Escape latch, so
+  normal operation can resume — this is the only thing that clears that latch.
+  `enable_blocking=false` additionally switches blocking **off for the rest of
+  the session**, after which no action takes the keyboard at all.
+
 ### The tracking outline
 - **What it means** A green outline is drawn around the attached window
   **exactly while automation holds the desktop** — from the first input until
@@ -208,7 +262,7 @@ and keyboard. Every input tool raises the window if it is not already there.
 
 ## Doing several things in one call
 
-### `run_steps(steps, delay_ms=120, stop_on_error=True)`
+### `run_steps(steps, delay_ms=120, stop_on_error=True, stop_if_user_types=True)`
 
 The point of this tool is to spend one round trip on a sequence the caller
 already knows works, instead of one per click.
@@ -253,6 +307,11 @@ already knows works, instead of one per click.
   prediction ends a run instead of driving the app further into an unplanned
   state. When a script stops early and has no image of its own, the window as
   it looks at that moment is attached.
+- **Rules — the keyboard is held for the whole script** Not per step, so the
+  person's typing cannot land between two of its clicks; the lease is renewed
+  as the script proceeds and given back however the call ends, including on an
+  exception. If the person presses a key anyway, the script stops at that step
+  and the summary says why, unless `stop_if_user_types=false`.
 - **Rules — cost and evidence** Each step is journaled separately as
   `script:<action>`, with its own before/after frames, so a run that goes wrong
   is reconstructable with `history()`/`replay_frame()`. `delay_ms` (0–3000)
@@ -329,6 +388,13 @@ Every tool call is appended to a session folder under
   machine.** Input cannot be delivered in the background to the apps this
   server targets (measured against Blender, the Godot editor and Notepad), so
   a run visibly takes over the desktop while acting. Reading does not.
+- **A machine-wide keyboard hook is installed once input is sent**, and it sees
+  every key event on the computer, not only those going to the target window —
+  that is what the mechanism is. It stores nothing and swallows only the
+  person's keys, only while an action is running. It is removed when the
+  process exits. The exposure is real and worth stating plainly: while this
+  server is running and has sent input, a bug in it is a bug in the path every
+  keystroke on the machine takes.
 - **Journal frames are screenshots of whatever was on the window**, written
   unencrypted to `%TEMP%`. If the window shows something private, so do they,
   until the folder is pruned five sessions later.
@@ -356,6 +422,31 @@ enough to fake.
 The attach/outline behaviour is checked with **another application genuinely in
 front**, not on the freshly-launched target: an attach that stole the desktop
 would look identical to one that did not if the target were already foreground.
+
+The keyboard block is verified in two halves, neither of which ever blocks the
+real keyboard:
+
+- `tests\test_input_guard.py` drives the decision logic with synthetic events
+  and an injected clock — so "the lease expires after 20 seconds" is checked by
+  handing it 20.01 seconds, not by waiting. It covers every release route and
+  the cases where the block must *stay* on: three slow Escapes must not release
+  it, an injected Escape must not release it (only the person can), and a key
+  the person was already holding when the block began must be allowed to come
+  back up so it does not stick down in the app.
+- `tests\diag_keyboard_block.py` installs a real hook against a real Notepad
+  and proves a character is genuinely swallowed, that ours still gets through
+  the same block, that the lease expires with nobody calling release, and that
+  three Escapes cut a 20-second lease short. It does this **without locking the
+  keyboard** by relabelling which events count as the person's: a character it
+  types itself is treated as human, and anything typed on the real keyboard
+  falls into a class that always passes. Verifying a keyboard lock by locking
+  the keyboard is the one experiment that can leave nobody able to type the fix.
+
+`smoke.py` covers the wiring the other two cannot: that no hook exists until
+the first input, that the keyboard is held **during** an action — sampled from
+another thread, because "it was released afterwards" is equally true of a block
+that was never taken — that it is released after, and that switching blocking
+off leaves typing working.
 
 `tests\diag_*.py` and `tests\spike_background*.py` are diagnostics, not tests:
 they print measurements and assert nothing. They exist because each overturned

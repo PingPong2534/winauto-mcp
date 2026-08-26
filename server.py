@@ -34,6 +34,7 @@ def _set_dpi_awareness():
 
 _set_dpi_awareness()
 
+import contextlib
 import functools
 import inspect
 import json
@@ -41,6 +42,7 @@ import time
 
 from mcp.server.mcpserver import Image, MCPServer
 
+import input_guard
 import input_sim
 import journal
 import location_cache
@@ -127,7 +129,18 @@ mcp = MCPServer(
         "piece of work and are about to think, report or wait, call "
         "release_control() to hand the foreground back -- but not in the "
         "middle of one interaction, since an open menu closes when its window "
-        "loses focus."
+        "loses focus.\n"
+        "While an action runs, the person's keystrokes are held out so their "
+        "typing cannot land in the middle of yours; yours are signed and pass "
+        "through. If a result says they pressed a key anyway, or run_steps "
+        "stops with stopped_because, TAKE THAT AS A STOP SIGNAL: they are "
+        "reaching for a machine you are holding. Call release_keyboard() and "
+        "ask them what they want, rather than retrying. The same goes for "
+        "latched_off_by_user in keyboard_status(), which means they pressed "
+        "Escape three times to demand the keyboard back -- that is a person "
+        "with a problem, not a flag to work around. keyboard_status() reports "
+        "only whether and when a human key happened, never which keys; there "
+        "is no way to ask this server what anyone typed."
     ),
 )
 
@@ -242,6 +255,27 @@ def _seen_view_at(x: int, y: int):
 # they hand their own frame to journal_frame() rather than being captured twice.
 _FRAME_TOOLS = frozenset(
     {"click", "click_element", "drag", "scroll", "type_text", "press_key", "hotkey"}
+)
+
+# Tools that hold the person's keyboard while they run. The same set that
+# sends input, plus run_steps, which sends input through all of them at once.
+# The lease is taken and released by the journaled wrapper rather than inside
+# each tool, so there is exactly one place that can fail to give it back.
+_HOLDING_TOOLS = _FRAME_TOOLS | {"run_steps"}
+
+# How long the keyboard is held for one action. Generous enough for a slow
+# click on a busy app, short enough that a crash between taking and releasing
+# costs the person a pause rather than a dead keyboard.
+_ACTION_LEASE = 5.0
+
+# A whole script holds the keyboard across all its steps, renewed as it goes,
+# so the person is not let in and out between every click.
+_SCRIPT_LEASE = 15.0
+
+_INTERRUPTED_NOTE = (
+    " -- NOTE: the person pressed {n} key(s) while this ran, and they were held out."
+    " They are trying to use the machine. Stop, call release_keyboard(), and ask"
+    " before doing anything else."
 )
 
 
@@ -393,12 +427,26 @@ def journaled(fn):
 
         started = time.monotonic()
         error = None
+        # The person's keys are held out for exactly as long as the action
+        # runs, and let back in even if it raises. _FRAME_TOOLS is the set that
+        # sends input, which is the same set for which interleaved typing would
+        # land in the middle of what we are doing.
+        holds_keyboard = name in _HOLDING_TOOLS
+        lease = _SCRIPT_LEASE if name == "run_steps" else _ACTION_LEASE
+        hold = (input_guard.holding(lease) if holds_keyboard
+                else contextlib.nullcontext(None))
         try:
-            result = fn(*args, **kwargs)
+            with hold as mark:
+                result = fn(*args, **kwargs)
+            interrupted = input_guard.interrupted_since(mark)
         except Exception as exc:  # noqa: BLE001 - journaled, then re-raised as-is
             error = exc
             result = f"{type(exc).__name__}: {exc}"
+            interrupted = 0
         elapsed_ms = round((time.monotonic() - started) * 1000)
+
+        if interrupted and isinstance(result, str):
+            result += _INTERRUPTED_NOTE.format(n=interrupted)
 
         after = _state["post_frame"]
         if after is None and wants_frames and error is None:
@@ -475,6 +523,9 @@ def detach_window() -> str:
     """Detach from the current window and hide the tracking overlay."""
     _state["hwnd"] = None
     get_overlay().untrack()
+    # Nothing is being driven any more, so nothing has a claim on the person's
+    # keyboard. Releasing here means walking away mid-run cannot leave it held.
+    input_guard.guard().release("detached")
     return "detached"
 
 
@@ -856,7 +907,8 @@ def _clamp_region(frame, region):
 
 
 @tool
-def run_steps(steps: list[dict], delay_ms: int = 120, stop_on_error: bool = True):
+def run_steps(steps: list[dict], delay_ms: int = 120, stop_on_error: bool = True,
+              stop_if_user_types: bool = True):
     """Run several actions in one call, in order, with a pause between them --
     instead of one tool call per click. Use it once you know an app well enough
     to predict what the next few steps are: opening a menu and picking an item,
@@ -896,6 +948,12 @@ def run_steps(steps: list[dict], delay_ms: int = 120, stop_on_error: bool = True
     seen the app do before, keep scripts short, and use "check" steps to make
     a wrong prediction stop the run rather than continue it.
 
+    The person's keyboard is held out for the whole script rather than per
+    step, so their typing cannot land between two of its clicks. If they press
+    a key anyway the script stops there, because someone reaching for the
+    keyboard mid-run wants the machine more than the script does; set
+    stop_if_user_types=false only for a script that must not be interrupted.
+
     Stops at the first failing step unless stop_on_error=false, and returns a
     per-step report plus, if it stopped early, the window as it looks now.
     `delay_ms` pauses between steps so the app can react.
@@ -909,6 +967,11 @@ def run_steps(steps: list[dict], delay_ms: int = 120, stop_on_error: bool = True
     mark = frame  # reference for "check" steps: script start, then each checkpoint
     guard_armed = True
     stopped_at = None
+    # The lease itself is taken by the journaled wrapper, which owns releasing
+    # it however this returns. Here we only watch for the person reaching for
+    # the keyboard, and keep the lease alive while a long script runs.
+    keys_at_start = input_guard.guard().human_events
+    interrupted = 0
 
     for i, step in enumerate(steps, 1):
         kind = step["do"]
@@ -1052,6 +1115,16 @@ def run_steps(steps: list[dict], delay_ms: int = 120, stop_on_error: bool = True
             stopped_at = i
             break
 
+        interrupted = input_guard.guard().human_events - keys_at_start
+        if interrupted and stop_if_user_types:
+            entry["user_interrupted"] = interrupted
+            stopped_at = i
+            break
+        # Renew rather than take: a script longer than one lease must not have
+        # the keyboard fall back to the person halfway through it, and a script
+        # that dies here still only holds it for the rest of one lease.
+        input_guard.renew(_SCRIPT_LEASE)
+
     if stopped_at is not None and not images:
         final = _try_grab()
         if final is not None:
@@ -1065,6 +1138,8 @@ def run_steps(steps: list[dict], delay_ms: int = 120, stop_on_error: bool = True
         "stopped_at_step": stopped_at,
         "steps": report,
         "images": [label for label, _ in images],
+        **({"stopped_because": _INTERRUPTED_NOTE.format(n=interrupted).strip(" -")}
+           if interrupted and stop_if_user_types else {}),
         "note": (
             "Images follow in the order listed. Coordinates in a cropped capture are offset by "
             "its region's top-left. Only the regions captured here count as looked at; a later "
@@ -1087,12 +1162,57 @@ def release_control() -> str:
     it (screenshot, wait_stable, locate_in_region, diff_since_snapshot) does
     not need it in front -- only sending input does, and the next action
     raises it again by itself. The tracking outline is removed too, and comes
-    back with the next action."""
+    back with the next action. The person's keyboard is handed back as well,
+    though an action that is not running is not holding it anyway."""
     get_overlay().untrack()
+    input_guard.guard().release("control released")
     title = window_manager.restore_foreground()
     if title is None:
         return "nothing to give back -- no window was displaced, or it has since closed"
-    return f'foreground returned to "{title}"; outline hidden; reading the attached window still works'
+    return (f'foreground returned to "{title}"; outline hidden; keyboard released; '
+            "reading the attached window still works")
+
+
+@tool
+def keyboard_status() -> str:
+    """Did the person touch the keyboard? Answers that and nothing more.
+
+    While an action or a script runs, their keystrokes are held out so they
+    cannot land in the middle of what is being typed; ours carry a signature
+    that lets them through the same block. This reports whether the block is
+    on, how long it has left, and whether any human key event has happened --
+    a count and a time, never which keys. Nothing that could reconstruct what
+    anyone typed is recorded anywhere, by design.
+
+    `latched_off_by_user` means the person pressed Escape three times to demand
+    the keyboard back. Nothing will block it again until release_keyboard()
+    is called, and that is deliberate: someone who reaches for that is having a
+    problem, so treat it as a stop signal, not something to work around."""
+    state = input_guard.guard().status()
+    state["watching"] = input_guard.hook_installed()
+    state["blocking_enabled"] = input_guard.enabled
+    return json.dumps(state, ensure_ascii=False)
+
+
+@tool
+def release_keyboard(enable_blocking: bool = True) -> str:
+    """Give the keyboard back to the person right now, and clear the latch set
+    by their triple-Escape so normal operation can resume.
+
+    Call it when you have finished driving and are about to think, report or
+    wait -- the companion to release_control(), which does the same for the
+    foreground. Pass enable_blocking=false to leave blocking switched off for
+    the rest of the session, so nothing holds their keyboard again."""
+    input_guard.enabled = bool(enable_blocking)
+    guard = input_guard.guard()
+    guard.release("release_keyboard()")
+    guard.rearm()
+    return (
+        "keyboard released and the escape latch cleared; "
+        + ("actions will hold it again while they run"
+           if input_guard.enabled else
+           "blocking is now OFF for the rest of this session")
+    )
 
 
 @tool
