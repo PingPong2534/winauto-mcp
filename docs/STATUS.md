@@ -5,7 +5,8 @@ finished behaviour lives in [SPEC.md](SPEC.md).
 
 ## Doing right now
 
-Idle. Nothing is running.
+Idle. Nothing is running. Branch `screen-freshness-and-desktop-sharing` is
+committed and pushed up to `8411927`; working tree clean.
 
 ## Just finished
 
@@ -47,11 +48,9 @@ raises it *and* brings the outline up, and `release_control` removes it. On the
 freshly-launched Notepad this test could not have failed, since the target is
 already foreground there.
 
-## Previously finished (same uncommitted branch)
+## Previously finished (same commit)
 
-Two features asked for to cut the cost of driving a familiar app, on branch
-`screen-freshness-and-desktop-sharing` — **written and verified, not yet
-committed** (the branch's previous work is committed as `9f63b8e`):
+Two features asked for to cut the cost of driving a familiar app:
 
 - **`capture_region(x1, y1, x2, y2)`** — screenshot one rectangle instead of
   the whole window, returning a header with the region captured and the offset
@@ -94,10 +93,10 @@ and SPEC rather than left implicit.
 
 ## Waiting on the user
 
-- **Commit/push the new work?** Uncommitted: `server.py`, `overlay.py`,
-  `window_manager.py`, `tests/smoke.py`, `README.md`, `docs/SPEC.md`,
-  `docs/STATUS.md`, plus two new diagnostics
-  (`tests/diag_overlay_paint.py`, `tests/diag_attach_cost.py`).
+- **Merge this branch?** `screen-freshness-and-desktop-sharing` is pushed but
+  no PR is open — open one, or merge to `master` directly? Everything on it is
+  two commits ahead of `master`, and `master` has never seen any of the
+  freshness, desktop-sharing, batching or region-capture work.
 - **`F:\knowledge` commit decision**, still unanswered.
   `development/windows-background-capture-and-input.md` is written and
   cross-linked but uncommitted, because that repo's `README.md` diff also
@@ -105,12 +104,12 @@ and SPEC rather than left implicit.
   still-untracked files. The options put to the user: (1) add `node_modules/`
   to `.gitignore` and commit everything (my recommendation), (2) commit only
   the two `development/*.md` files, (3) leave it.
-- **PR for this branch?** It is pushed but no PR is open — open one, or merge
-  to `master` directly?
 - **PR #1 "update doc of codex"** (branch `update_doc`, +39/−0) is open and
   unreviewed — review the diff, or merge as-is?
-- Whether `tests\diag_stability.py`, `tests\diag_typing.py` and the three
-  `tests\spike_background*.py` scripts stay in the repo. They are diagnostics,
+- Whether the diagnostics stay in the repo — `tests\diag_stability.py`,
+  `tests\diag_typing.py`, `tests\diag_overlay_paint.py`,
+  `tests\diag_attach_cost.py` and the three
+  `tests\spike_background*.py` scripts. They are diagnostics,
   not tests: they print measurements and assert nothing. Each earned its keep
   by overturning a wrong assumption, and `docs/SPEC.md` and the README cite
   them as the reproducible source of the measured numbers.
