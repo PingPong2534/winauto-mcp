@@ -5,12 +5,10 @@ finished behaviour lives in [SPEC.md](SPEC.md).
 
 ## Doing right now
 
-Idle. The `hover` tool, the pointer hold behind it, the overlay fix and the SPEC
-entries for all of it are committed and pushed as `d562aab` on `focus-return`,
-which is the branch **[PR #4](https://github.com/PingPong2534/winauto-mcp/pull/4)**
-is open on. That PR now carries three commits, 20 files, +2689/−127 — its title
-still says "Give the person their window back when an action finishes", which
-covered the first commit and no longer covers the branch.
+Idle. **[PR #4](https://github.com/PingPong2534/winauto-mcp/pull/4) is merged**
+(`5a82791`, 2026-08-26): the foreground hand-back, `hover` and its pointer hold,
+the overlay fix, and the `smoke.py` Notepad-leak fix are all on `master` now —
+20 files, +2692/−127. There is no open PR.
 
 **Everything run is green:**
 
@@ -68,9 +66,11 @@ only in a flag the decision never reads.
 
 ## Waiting on the user
 
-- **PR #4 is still open and unmerged**, and its title and description now
-  describe only its first commit. Either it gets retitled to cover the whole
-  branch, or `hover` comes out into a PR of its own — not decided.
+- **`smoke.py` has never run against what is now on `master`.** It was 109/109
+  at the first of the three merged commits and has not been run since, because
+  it launches Notepad (below). So the merged tree's end-to-end suite is
+  unverified — everything else is green, but that gap is real and merging did
+  not close it.
 - **Notepad's saved session still holds 56 windows.** The desktop is clear, but
   `LocalState\TabState` under `Microsoft.WindowsNotepad_8wekyb3d8bbwe` still has
   **56 files (5 KB)**, and the next launch of Notepad by anything restores them
