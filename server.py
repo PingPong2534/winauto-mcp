@@ -49,6 +49,18 @@ import window_manager
 from overlay import get_overlay
 from screenshot import changed_bbox, find_content_bbox, grab_window, to_png
 
+
+def _show_outline(hwnd) -> None:
+    """The green outline means "this window is being driven right now", not
+    "this window is bookmarked" -- so it appears when control is taken and is
+    removed by release_control()/detach_window(). Tracking only while driving
+    is also the only time its repainting is worth anything to anyone."""
+    if hwnd == _state["hwnd"]:
+        get_overlay().track(hwnd)
+
+
+window_manager.set_control_hook(_show_outline)
+
 mcp = MCPServer(
     name="winauto-mcp",
     instructions=(
@@ -88,26 +100,49 @@ mcp = MCPServer(
         "replay_frame(seq) to look at the screen as it actually was at that "
         "step, instead of reconstructing it from memory. Those frames are "
         "downscaled evidence: never take click coordinates off them.\n"
+        "Do not pay for the whole window when you only need part of it. To "
+        "re-check one thing -- did the dialog appear, did that field update -- "
+        "call capture_region(x1,y1,x2,y2) instead of screenshot(): a crop is a "
+        "fraction of the size to send and to read. Looking at a region counts "
+        "as having looked at THAT REGION, so a click inside it goes through "
+        "while one aimed somewhere you have not looked this run is still "
+        "refused; that is the point, not an obstacle.\n"
+        "Once you know an app, stop paying a round trip per click. run_steps() "
+        "performs a list of actions in order with a pause between them, and can "
+        "return small crops from the middle of the run. But only the FIRST step "
+        "is guarded against a stale coordinate -- the rest act on a screen the "
+        "script itself changed, which you have not seen. So script only what you "
+        "have watched the app do before, keep scripts short, and put "
+        "{\"do\":\"check\",\"region\":[...],\"expect\":\"changed\"} after any step the "
+        "rest depends on, so a wrong prediction stops the run instead of "
+        "carrying it into a state you did not plan for.\n"
         "The mouse, keyboard and desktop belong to a person who is probably "
-        "still using them. Reading the window (screenshot, wait_stable, "
+        "still using them. attach_window() does NOT take the desktop -- it "
+        "only picks which window the other tools mean, and leaves it wherever "
+        "it was. Reading the window (screenshot, capture_region, wait_stable, "
         "locate_in_region, diff_since_snapshot) works while it sits behind "
-        "other windows, so do not raise it just to look. Only sending input "
-        "brings it to the front; when you finish a piece of work and are about "
-        "to think, report or wait, call release_control() to hand the "
-        "foreground back -- but not in the middle of one interaction, since an "
-        "open menu closes when its window loses focus."
+        "other windows, so do not raise it just to look. The window comes to "
+        "the front, and the green outline appears, by itself the first time "
+        "you send input -- you never have to ask for that. When you finish a "
+        "piece of work and are about to think, report or wait, call "
+        "release_control() to hand the foreground back -- but not in the "
+        "middle of one interaction, since an open menu closes when its window "
+        "loses focus."
     ),
 )
 
 _state = {
     "hwnd": None,
     "last_snapshot": None,
-    # The most recent frame the caller actually looked at (or measured a
-    # coordinate from), and when. click() checks its target area against this
-    # to catch a click aimed using an out-of-date view of the screen.
-    "seen": None,
-    "seen_t": None,
-    "seen_seq": None,
+    # What the caller has actually looked at, newest last: one entry per view
+    # with the rect it covered and the frame as it was at that moment. click()
+    # checks its target against the newest view that covers it, to catch a
+    # click aimed using an out-of-date picture of that part of the window.
+    # A list rather than one frame because views can be partial: after
+    # capture_region(toolbar), the toolbar has been re-checked and the rest of
+    # the window has not, and collapsing those into "the caller has seen the
+    # screen" is exactly the blindness this guard exists to prevent.
+    "seen": [],
     # Frame captured by the journaling decorator immediately before the
     # current action tool ran; the staleness check reuses it instead of
     # grabbing the screen a second time.
@@ -143,15 +178,61 @@ def _find_element(hwnd, name: str):
     return None, 0
 
 
-def _mark_seen(frame) -> None:
-    """Note that the caller has now been shown this frame, or has derived a
-    coordinate from it. Only frames that informed the caller's next decision
-    count -- a capture taken purely for internal bookkeeping (a settle poll, a
-    journal thumbnail) must NOT be marked, or the staleness check silently
-    starts approving clicks aimed from a screen nobody looked at."""
-    _state["seen"] = frame
-    _state["seen_t"] = time.monotonic()
-    _state["seen_seq"] = journal.session_info()["records"] + 1
+MAX_SEEN_VIEWS = 8
+
+
+def _covers(outer, inner) -> bool:
+    return (
+        outer[0] <= inner[0]
+        and outer[1] <= inner[1]
+        and outer[2] >= inner[2]
+        and outer[3] >= inner[3]
+    )
+
+
+def _mark_seen(frame, rect=None) -> None:
+    """Note that the caller has now been shown part of this frame, or has
+    derived a coordinate from it. `rect` is the part actually looked at,
+    defaulting to the whole frame.
+
+    Only views that informed the caller's next decision count -- a capture
+    taken purely for internal bookkeeping (a settle poll, a journal thumbnail)
+    must NOT be marked, or the staleness check silently starts approving
+    clicks aimed from a screen nobody looked at.
+
+    The full frame is kept even for a partial view, because it is the pixel
+    reference a later comparison needs; `rect` records how much of it the
+    caller is entitled to have an opinion about.
+    """
+    rect = tuple(rect) if rect else (0, 0, *frame.size)
+    views = [v for v in _state["seen"] if not _covers(rect, v["rect"])]
+    views.append(
+        {
+            "rect": rect,
+            "frame": frame,
+            "t": time.monotonic(),
+            "seq": journal.session_info()["records"] + 1,
+        }
+    )
+    _state["seen"] = views[-MAX_SEEN_VIEWS:]
+
+
+def _seen_view_at(x: int, y: int):
+    """The most recent view containing the point (x, y), or None if the caller
+    has not looked at that part of the window.
+
+    Containment is tested against the point, not against the whole area the
+    staleness check would like to compare: a caller who looked at a 30x12
+    label did legitimately see the thing it is about to click, and demanding
+    that the surrounding 40px also have been seen would refuse every click
+    located by locate_in_region. The comparison area is intersected with the
+    view instead, so the check covers as much as was actually looked at.
+    """
+    for view in reversed(_state["seen"]):
+        rx1, ry1, rx2, ry2 = view["rect"]
+        if rx1 <= x < rx2 and ry1 <= y < ry2:
+            return view
+    return None
 
 
 # Tools whose effect is visual and worth a before/after frame in the journal.
@@ -188,27 +269,9 @@ def _stale_block(x: int, y: int, what: str):
     looking at it goes through. Blocking twice for one change would just be a
     loop the caller can't escape.
     """
-    seen, current = _state["seen"], _state["pre_frame"]
-    if seen is None or current is None:
+    current = _state["pre_frame"]
+    if not _state["seen"] or current is None:
         return None  # nothing looked at yet, or the window couldn't be grabbed
-
-    age = time.monotonic() - (_state["seen_t"] or 0)
-    context = {
-        "blocked": True,
-        "performed": False,
-        "action": what,
-        "seen_at_step": _state["seen_seq"],
-        "seen_age_s": round(age, 1),
-    }
-
-    if seen.size != current.size:
-        _mark_seen(current)
-        context["reason"] = (
-            f"the window was resized since you last looked ({seen.size[0]}x{seen.size[1]} "
-            f"-> {current.size[0]}x{current.size[1]}), so every coordinate from that view "
-            "is off. Attached is the window as it is now."
-        )
-        return [json.dumps(context, ensure_ascii=False), Image(data=to_png(current), format="png")]
 
     w, h = current.size
     region = (
@@ -219,23 +282,60 @@ def _stale_block(x: int, y: int, what: str):
     )
     if region[2] <= region[0] or region[3] <= region[1]:
         return None  # target is outside the client area; let the action fail on its own terms
+
+    context = {"blocked": True, "performed": False, "action": what}
+
+    def refuse(reason):
+        context["reason"] = reason
+        _mark_seen(current)
+        return [json.dumps(context, ensure_ascii=False), Image(data=to_png(current), format="png")]
+
+    view = _seen_view_at(x, y)
+    if view is None:
+        looked_at = [list(v["rect"]) for v in _state["seen"]]
+        context["regions_you_have_looked_at"] = looked_at
+        return refuse(
+            f"NOT PERFORMED. The parts of this window you have looked at are {looked_at}, and "
+            f"({x}, {y}) is in none of them -- so that coordinate comes from memory, not from "
+            "anything you have seen this run. Attached is the whole window as it is right now."
+        )
+
+    seen, age = view["frame"], time.monotonic() - view["t"]
+    context["seen_at_step"] = view["seq"]
+    context["seen_age_s"] = round(age, 1)
+
+    if seen.size != current.size:
+        return refuse(
+            f"the window was resized since you last looked ({seen.size[0]}x{seen.size[1]} "
+            f"-> {current.size[0]}x{current.size[1]}), so every coordinate from that view "
+            "is off. Attached is the window as it is now."
+        )
+
+    # Only compare what was actually looked at: outside the view, `seen` holds
+    # pixels the caller was never shown, and judging them would report a change
+    # the caller had no way to know about.
+    vx1, vy1, vx2, vy2 = view["rect"]
+    region = (
+        max(region[0], vx1),
+        max(region[1], vy1),
+        min(region[2], vx2),
+        min(region[3], vy2),
+    )
     box = changed_bbox(seen, current, threshold=STALE_THRESHOLD, region=region)
     if box is None:
         return None
 
-    _mark_seen(current)
     context["changed_bbox"] = list(box)
     context["checked_region"] = list(region)
-    context["reason"] = (
+    return refuse(
         f"NOT PERFORMED. The screen within {STALE_RADIUS}px of ({x}, {y}) changed after the "
-        f"frame you took your coordinates from ({age:.1f}s ago, step {_state['seen_seq']}), "
+        f"frame you took your coordinates from ({age:.1f}s ago, step {view['seq']}), "
         "so that target is no longer what you saw. Attached is the window as it is right now: "
         "check whether your target is still there and still at these coordinates. Re-issue the "
         "action (it will go through now that you have looked), or re-locate the target with "
         "locate_in_region. If the app repaints this area continuously and the change is "
         "irrelevant, pass force=true. If it is still loading, wait_stable() first."
     )
-    return [json.dumps(context, ensure_ascii=False), Image(data=to_png(current), format="png")]
 
 
 def journal_frame(frame) -> None:
@@ -341,21 +441,33 @@ def list_windows() -> str:
 
 
 @tool
-def attach_window(hwnd: int) -> str:
-    """Attach to a window by hwnd (from list_windows). Brings it to the foreground
-    and shows a green tracking outline around it."""
+def attach_window(hwnd: int, take_control: bool = False) -> str:
+    """Attach to a window by hwnd (from list_windows). This only chooses which
+    window the other tools act on -- it does NOT take the desktop over. The
+    window is left exactly where it was, in front or behind, and no outline is
+    drawn, so attaching costs the person at the keyboard nothing.
+
+    You can already read the window from here: screenshot, capture_region,
+    get_elements, wait_stable and locate_in_region all work while it is
+    covered. The window is raised and the green outline appears by itself the
+    first time you actually send input, because that is the first moment input
+    requires it -- and it goes away again on release_control().
+
+    Pass take_control=true only if you want it raised immediately, e.g. so a
+    person can watch which window is about to be driven."""
     if not window_manager.window_exists(hwnd):
         raise ValueError(f"no such window: {hwnd}")
-    window_manager.bring_to_foreground(hwnd)
     _state["hwnd"] = hwnd
-    _state["seen"] = _state["seen_t"] = _state["seen_seq"] = None
-    get_overlay().track(hwnd)
+    _state["seen"] = []
+    if take_control:
+        window_manager.bring_to_foreground(hwnd)  # the hook draws the outline
     title = window_manager.get_window_title(hwnd)
     # Attaching is the start of an automation run, so it starts a fresh
     # journal -- history() should describe this run, not trail off into the
     # previous app's steps.
     session = journal.start_session(f"{title} (hwnd={hwnd})")
-    return f'attached to "{title}" (hwnd={hwnd}); journal session {session}'
+    how = "in front, outline showing" if take_control else "left as it was; reading works from behind"
+    return f'attached to "{title}" (hwnd={hwnd}) -- {how}; journal session {session}'
 
 
 @tool
@@ -393,6 +505,56 @@ def screenshot():
     _mark_seen(frame)
     journal_frame(frame)
     return Image(data=to_png(frame), format="png")
+
+
+@tool
+def capture_region(x1: int, y1: int, x2: int, y2: int):
+    """Screenshot ONE PART of the attached window instead of all of it, given
+    a client-relative rect. Use this whenever you only need to check one thing
+    -- did the dialog appear, did the value in that field update, is the button
+    enabled now -- rather than re-reading the whole window. A crop is a much
+    smaller image to send and to look at than a full window, so checking three
+    small areas this way costs less than one full screenshot.
+
+    Coordinates in the returned crop are NOT client coordinates: the crop's
+    top-left is (x1, y1) of the window. The header says so and repeats the
+    offset. As always, do not eyeball a click coordinate off the image --
+    call locate_in_region on the same rect to get an exact point.
+
+    Looking at a region counts as having looked at THAT REGION ONLY. click()
+    tracks this per area, so a click inside the part you just checked goes
+    through, while one aimed at a part of the window you have not looked at
+    this run is refused -- checking the toolbar does not make a stale memory
+    of the sidebar fresh again. Use screenshot() when you do need everything.
+    """
+    hwnd = _require_attached()
+    frame = grab_window(hwnd)
+    w, h = frame.size
+    rect = (max(0, min(x1, w)), max(0, min(y1, h)), max(0, min(x2, w)), max(0, min(y2, h)))
+    if rect[2] <= rect[0] or rect[3] <= rect[1]:
+        raise ValueError(
+            f"region [{x1},{y1},{x2},{y2}] is empty or entirely outside the "
+            f"{w}x{h} client area -- need x2>x1, y2>y1, and some overlap with the window"
+        )
+    _mark_seen(frame, rect)
+    # The journal keeps the whole frame, not the crop: its job is to answer
+    # "what was going on at that step", and the part deliberately not looked
+    # at is usually where the answer is.
+    journal_frame(frame)
+    header = json.dumps(
+        {
+            "region": list(rect),
+            "crop_size": [rect[2] - rect[0], rect[3] - rect[1]],
+            "coordinate_offset": [rect[0], rect[1]],
+            "note": (
+                "crop of the attached window. Its (0,0) is client "
+                f"({rect[0]}, {rect[1]}) -- add that offset to anything you read here. "
+                "Only this rect counts as looked at; clicks elsewhere are still "
+                "checked against whenever you last saw that part."
+            ),
+        }
+    )
+    return [header, Image(data=to_png(frame.crop(rect)), format="png")]
 
 
 @tool
@@ -515,6 +677,12 @@ def wait_stable(
     screenshot() or locate_in_region() after this returns.
     """
     hwnd = _require_attached()
+    return json.dumps(_settle(hwnd, timeout, settle_ms, interval, threshold, region))
+
+
+def _settle(hwnd, timeout=5.0, settle_ms=400, interval=0.12, threshold=10, region=None) -> dict:
+    """The polling loop behind wait_stable(), shared with run_steps'
+    {"do":"wait_stable"} step so a script waits exactly the way the tool does."""
     if timeout <= 0:
         raise ValueError("timeout must be > 0")
     watched = tuple(region) if region else None
@@ -537,34 +705,30 @@ def wait_stable(
         if box is None:
             if (now - steady_since) * 1000 >= settle_ms:
                 journal_frame(to_png(current))
-                return json.dumps(
-                    {
-                        "stable": True,
-                        "waited_ms": round((now - started) * 1000),
-                        "polls": polls,
-                        "changed_during_wait": changes > 0,
-                    }
-                )
+                return {
+                    "stable": True,
+                    "waited_ms": round((now - started) * 1000),
+                    "polls": polls,
+                    "changed_during_wait": changes > 0,
+                }
         else:
             steady_since = now
             changes += 1
             last_change = list(box)
         if now >= deadline:
             journal_frame(to_png(current))
-            return json.dumps(
-                {
-                    "stable": False,
-                    "waited_ms": round((now - started) * 1000),
-                    "polls": polls,
-                    "last_change_bbox": last_change,
-                    "hint": (
-                        "still repainting at timeout -- if that bbox is a region that "
-                        "animates on its own (caret, viewport, clock), re-run with "
-                        "region=[...] around the part you actually care about, or raise "
-                        "threshold; otherwise the app is still busy, so raise timeout"
-                    ),
-                }
-            )
+            return {
+                "stable": False,
+                "waited_ms": round((now - started) * 1000),
+                "polls": polls,
+                "last_change_bbox": last_change,
+                "hint": (
+                    "still repainting at timeout -- if that bbox is a region that "
+                    "animates on its own (caret, viewport, clock), re-run with "
+                    "region=[...] around the part you actually care about, or raise "
+                    "threshold; otherwise the app is still busy, so raise timeout"
+                ),
+            }
 
 
 @tool
@@ -623,6 +787,294 @@ def scroll(x: int, y: int, clicks: int, keep_cursor: bool = False) -> str:
     return f"scrolled {clicks} click(s) at ({x}, {y})"
 
 
+MAX_SCRIPT_STEPS = 40
+MAX_SCRIPT_WAIT_MS = 60_000
+
+# What a step in run_steps may say, and which of its keys are required.
+_STEP_KINDS = {
+    "click": ("x", "y"),
+    "drag": ("x1", "y1", "x2", "y2"),
+    "scroll": ("x", "y", "clicks"),
+    "type": ("text",),
+    "key": ("key",),
+    "hotkey": ("keys",),
+    "click_element": ("name",),
+    "wait": ("ms",),
+    "wait_stable": (),
+    "capture": (),
+    "check": (),
+}
+
+
+def _validate_steps(steps):
+    """Check the whole script before any of it runs. A typo in step 7 must not
+    be discovered with steps 1-6 already applied to a real app -- half a script
+    leaves the window in a state nobody planned for, and the fix has to start
+    by working out what actually happened."""
+    if not isinstance(steps, list) or not steps:
+        raise ValueError("steps must be a non-empty list of {'do': ...} objects")
+    if len(steps) > MAX_SCRIPT_STEPS:
+        raise ValueError(
+            f"{len(steps)} steps is over the {MAX_SCRIPT_STEPS}-step limit -- split it, and look "
+            "at the screen in between; a script that long is running on assumptions by the end"
+        )
+    waited = 0
+    for i, step in enumerate(steps, 1):
+        if not isinstance(step, dict):
+            raise ValueError(f"step {i} is not an object: {step!r}")
+        kind = step.get("do")
+        if kind not in _STEP_KINDS:
+            raise ValueError(
+                f"step {i}: unknown action {kind!r} -- must be one of {sorted(_STEP_KINDS)}"
+            )
+        missing = [k for k in _STEP_KINDS[kind] if step.get(k) is None]
+        if missing:
+            raise ValueError(f"step {i} ({kind}) is missing {missing}")
+        if kind == "click" and step.get("button", "left") not in ("left", "right"):
+            raise ValueError(f"step {i}: button must be 'left' or 'right'")
+        if kind == "check" and step.get("expect", "changed") not in ("changed", "unchanged"):
+            raise ValueError(f"step {i}: expect must be 'changed' or 'unchanged'")
+        if kind == "wait":
+            waited += int(step["ms"])
+        if kind == "wait_stable":
+            waited += int(float(step.get("timeout", 5.0)) * 1000)
+    if waited > MAX_SCRIPT_WAIT_MS:
+        raise ValueError(
+            f"the script asks to wait {waited}ms in total, over the {MAX_SCRIPT_WAIT_MS}ms limit "
+            "-- a script that spends a minute waiting should be split so you can look at what it "
+            "is waiting for"
+        )
+
+
+def _clamp_region(frame, region):
+    w, h = frame.size
+    x1, y1, x2, y2 = region
+    rect = (max(0, min(x1, w)), max(0, min(y1, h)), max(0, min(x2, w)), max(0, min(y2, h)))
+    if rect[2] <= rect[0] or rect[3] <= rect[1]:
+        raise ValueError(f"region {list(region)} is empty or outside the {w}x{h} client area")
+    return rect
+
+
+@tool
+def run_steps(steps: list[dict], delay_ms: int = 120, stop_on_error: bool = True):
+    """Run several actions in one call, in order, with a pause between them --
+    instead of one tool call per click. Use it once you know an app well enough
+    to predict what the next few steps are: opening a menu and picking an item,
+    filling three fields and pressing Enter, a keyboard chord followed by a
+    dialog. Each step is journaled with its own before/after frame, so a script
+    that goes wrong is still reconstructable with history()/replay_frame().
+
+    `steps` is a list of objects, each with "do" plus that action's arguments:
+      {"do":"click","x":100,"y":200,"button":"left","double":false,"modifiers":["ctrl"],"keep_cursor":false}
+      {"do":"drag","x1":..,"y1":..,"x2":..,"y2":..,"button":"left"}
+      {"do":"scroll","x":..,"y":..,"clicks":-3}
+      {"do":"type","text":"hello"}
+      {"do":"key","key":"enter"}
+      {"do":"hotkey","keys":["ctrl","s"]}
+      {"do":"click_element","name":"Save"}
+      {"do":"wait","ms":500}
+      {"do":"wait_stable","timeout":5.0,"settle_ms":400,"region":[x1,y1,x2,y2]}
+      {"do":"capture","region":[x1,y1,x2,y2]}   -- region optional; omit for the whole window
+      {"do":"check","region":[x1,y1,x2,y2],"expect":"changed"}   -- "changed" or "unchanged"
+
+    A "capture" step returns an image, so you can watch a couple of points in
+    the script without stopping it. Keep those to small regions -- that is the
+    entire saving over doing it step by step.
+
+    A "check" step is how a script fails early instead of carrying on into a
+    state you did not plan for: it compares the region against how it looked at
+    the previous checkpoint (script start, or the last capture/check) and stops
+    the script if the expectation does not hold. Put one after any step whose
+    success the rest of the script depends on -- a menu that must have opened,
+    a dialog that must have closed.
+
+    THE STALENESS CHECK ONLY GUARDS THE FIRST STEP. It cannot guard the rest:
+    step 2 acts on a screen that step 1 deliberately changed, and there is no
+    frame you have seen of it. So the coordinates in steps 2..n are your
+    prediction of what the app will do, which is exactly the assumption this
+    server otherwise refuses to make on your behalf. Script only what you have
+    seen the app do before, keep scripts short, and use "check" steps to make
+    a wrong prediction stop the run rather than continue it.
+
+    Stops at the first failing step unless stop_on_error=false, and returns a
+    per-step report plus, if it stopped early, the window as it looks now.
+    `delay_ms` pauses between steps so the app can react.
+    """
+    hwnd = _require_attached()
+    _validate_steps(steps)
+    delay = max(0, min(int(delay_ms), 3000)) / 1000
+
+    report, images = [], []
+    frame = _try_grab()
+    mark = frame  # reference for "check" steps: script start, then each checkpoint
+    guard_armed = True
+    stopped_at = None
+
+    for i, step in enumerate(steps, 1):
+        kind = step["do"]
+        entry = {"step": i, "do": kind, "ok": True}
+        started = time.monotonic()
+        before = frame
+        error = None
+        try:
+            if kind == "click":
+                x, y = int(step["x"]), int(step["y"])
+                if guard_armed and not step.get("force"):
+                    _state["pre_frame"] = frame
+                    blocked = _stale_block(x, y, f"click({x}, {y})")
+                    _state["pre_frame"] = None
+                    if blocked is not None:
+                        entry.update(ok=False, result=json.loads(blocked[0])["reason"])
+                        report.append(entry)
+                        images.append(("blocked at step 1", blocked[1]))
+                        stopped_at = i
+                        break
+                input_sim.click_in_window(
+                    hwnd, x, y,
+                    button=step.get("button", "left"),
+                    double=bool(step.get("double", False)),
+                    modifiers=step.get("modifiers"),
+                    keep_cursor=bool(step.get("keep_cursor", False)),
+                )
+                guard_armed = False
+                entry["result"] = f"clicked ({x}, {y})"
+            elif kind == "drag":
+                x1, y1, x2, y2 = (int(step[k]) for k in ("x1", "y1", "x2", "y2"))
+                if guard_armed and not step.get("force"):
+                    _state["pre_frame"] = frame
+                    blocked = _stale_block(x1, y1, f"drag({x1}, {y1}) -> ({x2}, {y2})")
+                    _state["pre_frame"] = None
+                    if blocked is not None:
+                        entry.update(ok=False, result=json.loads(blocked[0])["reason"])
+                        report.append(entry)
+                        images.append(("blocked at step 1", blocked[1]))
+                        stopped_at = i
+                        break
+                input_sim.drag_in_window(
+                    hwnd, x1, y1, x2, y2,
+                    button=step.get("button", "left"),
+                    keep_cursor=bool(step.get("keep_cursor", False)),
+                )
+                guard_armed = False
+                entry["result"] = f"dragged ({x1}, {y1}) -> ({x2}, {y2})"
+            elif kind == "scroll":
+                x, y, clicks = int(step["x"]), int(step["y"]), int(step["clicks"])
+                input_sim.scroll_in_window(
+                    hwnd, x, y, clicks, keep_cursor=bool(step.get("keep_cursor", False))
+                )
+                guard_armed = False
+                entry["result"] = f"scrolled {clicks} at ({x}, {y})"
+            elif kind == "type":
+                input_sim.type_text(str(step["text"]), hwnd=hwnd)
+                guard_armed = False
+                entry["result"] = f"typed {len(str(step['text']))} characters"
+            elif kind == "key":
+                input_sim.press_key(str(step["key"]), hwnd=hwnd)
+                guard_armed = False
+                entry["result"] = f"pressed {step['key']}"
+            elif kind == "hotkey":
+                input_sim.press_keys(list(step["keys"]), hwnd=hwnd)
+                guard_armed = False
+                entry["result"] = f"pressed chord {'+'.join(step['keys'])}"
+            elif kind == "click_element":
+                el, count = _find_element(hwnd, str(step["name"]))
+                if el is None:
+                    raise ValueError(f'no element matching "{step["name"]}"')
+                ex1, ey1, ex2, ey2 = el["rect"]
+                cx, cy = (ex1 + ex2) // 2, (ey1 + ey2) // 2
+                input_sim.click_in_window(
+                    hwnd, cx, cy,
+                    button=step.get("button", "left"),
+                    double=bool(step.get("double", False)),
+                )
+                guard_armed = False
+                entry["result"] = f'clicked element "{el["name"]}" at ({cx}, {cy})'
+            elif kind == "wait":
+                time.sleep(max(0, min(int(step["ms"]), MAX_SCRIPT_WAIT_MS)) / 1000)
+                entry["result"] = f"waited {step['ms']}ms"
+            elif kind == "wait_stable":
+                entry["result"] = _settle(
+                    hwnd,
+                    timeout=float(step.get("timeout", 5.0)),
+                    settle_ms=int(step.get("settle_ms", 400)),
+                    threshold=int(step.get("threshold", 10)),
+                    region=step.get("region"),
+                )
+            elif kind == "capture":
+                shot = _try_grab() or frame
+                if shot is None:
+                    raise ValueError("could not capture the window")
+                rect = _clamp_region(shot, step["region"]) if step.get("region") else (0, 0, *shot.size)
+                _mark_seen(shot, rect)
+                images.append((f"step {i}: region {list(rect)}", Image(data=to_png(shot.crop(rect)), format="png")))
+                entry["result"] = f"captured {list(rect)} (image attached, offset {rect[0]},{rect[1]})"
+                mark = shot
+            elif kind == "check":
+                now = _try_grab()
+                if now is None or mark is None:
+                    raise ValueError("could not capture the window to check it")
+                rect = _clamp_region(now, step["region"]) if step.get("region") else None
+                expect = step.get("expect", "changed")
+                box = changed_bbox(mark, now, threshold=int(step.get("threshold", 10)), region=rect)
+                where = list(rect) if rect else "the whole window"
+                if expect == "changed" and box is None:
+                    raise ValueError(
+                        f"expected {where} to have changed since the previous checkpoint, but it is "
+                        "pixel-identical -- the step before this one had no visible effect there"
+                    )
+                if expect == "unchanged" and box is not None:
+                    raise ValueError(
+                        f"expected {where} to be unchanged since the previous checkpoint, but it "
+                        f"changed at {list(box)}"
+                    )
+                entry["result"] = f"{where} was {expect} as expected"
+                mark = now
+        except Exception as exc:  # noqa: BLE001 - reported per step, not raised
+            error = exc
+            entry.update(ok=False, result=f"{type(exc).__name__}: {exc}")
+
+        if delay:
+            time.sleep(delay)
+        frame = _try_grab()
+        entry["ms"] = round((time.monotonic() - started) * 1000)
+        journal.record(
+            f"script:{kind}",
+            args={"step": i, **{k: v for k, v in step.items() if k != "do"}},
+            ok=entry["ok"],
+            result=entry.get("result"),
+            ms=entry["ms"],
+            window=window_manager.get_window_title(hwnd),
+            before=before,
+            after=frame,
+        )
+        report.append(entry)
+        if error is not None and stop_on_error:
+            stopped_at = i
+            break
+
+    if stopped_at is not None and not images:
+        final = _try_grab()
+        if final is not None:
+            _mark_seen(final)
+            images.append(("the window where the script stopped", Image(data=to_png(final), format="png")))
+
+    summary = {
+        "ok": stopped_at is None and all(s["ok"] for s in report),
+        "performed": len(report),
+        "of": len(steps),
+        "stopped_at_step": stopped_at,
+        "steps": report,
+        "images": [label for label, _ in images],
+        "note": (
+            "Images follow in the order listed. Coordinates in a cropped capture are offset by "
+            "its region's top-left. Only the regions captured here count as looked at; a later "
+            "click elsewhere is still judged against whenever you last saw that part. Each step "
+            "is in the journal as script:<action> with before/after frames."
+        ),
+    }
+    return [json.dumps(summary, ensure_ascii=False), *[img for _, img in images]]
+
+
 @tool
 def release_control() -> str:
     """Give the desktop back: put whatever window the person was using before
@@ -634,11 +1086,13 @@ def release_control() -> str:
     Nothing else is lost by calling it. The window stays attached, and reading
     it (screenshot, wait_stable, locate_in_region, diff_since_snapshot) does
     not need it in front -- only sending input does, and the next action
-    raises it again by itself."""
+    raises it again by itself. The tracking outline is removed too, and comes
+    back with the next action."""
+    get_overlay().untrack()
     title = window_manager.restore_foreground()
     if title is None:
         return "nothing to give back -- no window was displaced, or it has since closed"
-    return f'foreground returned to "{title}"; reading the attached window still works'
+    return f'foreground returned to "{title}"; outline hidden; reading the attached window still works'
 
 
 @tool
@@ -678,8 +1132,11 @@ def locate_in_region(x1: int, y1: int, x2: int, y2: int, threshold: int = 30) ->
     frame = grab_window(hwnd)
     # The returned centre is measured off this frame, so the caller's next
     # click is aimed at this frame -- record it as seen, or the staleness
-    # check would reject a coordinate that was in fact freshly measured.
-    _mark_seen(frame)
+    # check would reject a coordinate that was in fact freshly measured. Only
+    # this region though: measuring a button tells the caller nothing about
+    # the rest of the window, and claiming otherwise would make a later click
+    # elsewhere look freshly informed when it is not.
+    _mark_seen(frame, (x1, y1, x2, y2))
     journal_frame(frame)
     bbox = find_content_bbox(frame, (x1, y1, x2, y2), threshold=threshold)
     if bbox is None:
@@ -784,7 +1241,7 @@ def recall_location(label: str, margin: int = 15, threshold: int = 30) -> str:
     rx1, ry1 = max(0, cx1 - margin), max(0, cy1 - margin)
     rx2, ry2 = cx2 + margin, cy2 + margin
     frame = grab_window(hwnd)
-    _mark_seen(frame)  # same reasoning as locate_in_region
+    _mark_seen(frame, (rx1, ry1, rx2, ry2))  # same reasoning as locate_in_region
     journal_frame(frame)
     bbox = find_content_bbox(frame, (rx1, ry1, rx2, ry2), threshold=threshold)
     if bbox is None:
@@ -817,8 +1274,17 @@ def highlight(rects: list[list[int]]) -> str:
     """Draw red debug boxes on the overlay at the given [x1,y1,x2,y2] rects
     (client-relative). Pass an empty list to clear. Purely visual, for the
     human watching the screen -- has no effect on click/type."""
-    _require_attached()
-    get_overlay().set_highlights([tuple(r) for r in rects])
+    hwnd = _require_attached()
+    # Asking for a box drawn is an explicit request to see the overlay, so it
+    # starts tracking even if no input has been sent yet -- otherwise the
+    # boxes would go to a hidden overlay and the call would silently do
+    # nothing. Clearing with an empty list also puts the overlay away.
+    overlay = get_overlay()
+    if rects:
+        overlay.track(hwnd)
+        overlay.set_highlights([tuple(r) for r in rects])
+    else:
+        overlay.untrack()
     return f"highlighted {len(rects)} rect(s)"
 
 

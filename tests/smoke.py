@@ -40,6 +40,16 @@ def call(name, **kwargs):
     return result.is_error, "\n".join(parts)
 
 
+def image_bytes(out: str) -> int:
+    """Size of the first image in a tool result, as call() renders it
+    ("<image 12345b b64>"). Used to check that a crop really is cheaper to
+    send than a full window, rather than assuming it."""
+    for part in out.split("<image "):
+        if "b b64>" in part:
+            return int(part.split("b b64>")[0])
+    return 0
+
+
 def check(label, condition, detail=""):
     print(f"  [{'PASS' if condition else 'FAIL'}] {label}{(' -- ' + detail) if detail else ''}")
     return bool(condition)
@@ -71,7 +81,49 @@ def main():
         print("\n-- capture marks the frame as seen")
         err, out = call("screenshot")
         failures += not check("screenshot returned an image", not err and "<image" in out)
-        failures += not check("frame recorded as seen", server._state["seen"] is not None)
+        failures += not check("frame recorded as seen", bool(server._state["seen"]))
+        whole_bytes = image_bytes(out)
+
+        print("\n-- capture_region(): checking one part instead of the whole window")
+        err, out = call("capture_region", x1=0, y1=0, x2=300, y2=120)
+        head = json.loads(out.splitlines()[0]) if not err else {}
+        failures += not check("returns a header plus an image", not err and "<image" in out, out[:120])
+        failures += not check(
+            "says where the crop sits in client coordinates",
+            head.get("region") == [0, 0, 300, 120] and head.get("coordinate_offset") == [0, 0],
+            str(head)[:160],
+        )
+        crop_bytes = image_bytes(out)
+        failures += not check(
+            "the crop is a fraction of the whole window to send",
+            crop_bytes * 4 < whole_bytes,
+            f"{crop_bytes}b vs {whole_bytes}b for the full window",
+        )
+        err, out = call("capture_region", x1=-50, y1=-50, x2=999999, y2=999999)
+        head = json.loads(out.splitlines()[0]) if not err else {}
+        failures += not check(
+            "a rect hanging off the window is clamped, not rejected",
+            not err and head.get("region", [None])[0] == 0,
+            str(head)[:120],
+        )
+        err, out = call("capture_region", x1=90000, y1=90000, x2=90100, y2=90100)
+        failures += not check("a rect entirely off the window is rejected", err, out[:120])
+
+        # Looking at a corner must not make a coordinate elsewhere fresh. The
+        # earlier screenshot legitimately covers the whole window, so clear it
+        # first -- otherwise this checks nothing, because the full view would
+        # answer for the click on its own.
+        server._state["seen"] = []
+        call("capture_region", x1=0, y1=0, x2=300, y2=120)
+        err, out = call("click", x=600, y=700)
+        failures += not check(
+            "a click outside the part that was checked is refused",
+            not err and "in none of them" in out,
+            out[:140],
+        )
+        failures += not check("and the whole window comes back with the refusal", "<image" in out)
+        err, out = call("click", x=600, y=700)
+        failures += not check("re-issuing after seeing the whole window works", not err and "clicked" in out, out[:80])
 
         print("\n-- an action gets before/after frames")
         err, out = call("type_text", text="สวัสดี hello")
@@ -123,9 +175,20 @@ def main():
         ImageDraw.Draw(far).rectangle((20, 20, 60, 60), fill=(255, 0, 0))
         ImageDraw.Draw(near).rectangle((490, 490, 530, 530), fill=(255, 0, 0))
 
-        def predicate(seen, now, x=500, y=500):
-            server._state["seen"], server._state["seen_t"] = seen, time.time()
-            server._state["seen_seq"], server._state["pre_frame"] = 1, now
+        def predicate(seen, now, x=500, y=500, rect=None):
+            server._state["seen"] = (
+                []
+                if seen is None
+                else [
+                    {
+                        "rect": tuple(rect) if rect else (0, 0, *seen.size),
+                        "frame": seen,
+                        "t": time.monotonic(),
+                        "seq": 1,
+                    }
+                ]
+            )
+            server._state["pre_frame"] = now
             return server._stale_block(x, y, "test")
 
         failures += not check("identical frames do not block", predicate(base, base) is None)
@@ -137,7 +200,30 @@ def main():
             predicate(base, base.resize((base.width // 2, base.height // 2))) is not None,
         )
         failures += not check("no reference frame means no block", predicate(None, base) is None)
-        server._state["seen"] = server._state["pre_frame"] = None
+
+        # Having looked at part of the window must not count as having looked
+        # at the rest of it -- that is the whole reason capture_region tracks
+        # what it showed rather than marking the frame wholesale.
+        LOOKED = (450, 450, 600, 600)
+        failures += not check(
+            "a click inside the part that was looked at is judged normally",
+            predicate(base, near, rect=LOOKED) is not None
+            and predicate(base, base, rect=LOOKED) is None,
+        )
+        outside = predicate(base, base, x=100, y=100, rect=LOOKED)
+        failures += not check(
+            "a click outside every region looked at is refused",
+            outside is not None and "in none of them" in outside[0],
+            str(outside)[:180] if outside else "not blocked",
+        )
+        # A tight region must still allow the click it was measured for: the
+        # 40px comparison box reaches outside a small view, and demanding the
+        # whole box have been seen would refuse every locate_in_region result.
+        failures += not check(
+            "a region smaller than the comparison box still allows its own target",
+            predicate(base, base, x=500, y=500, rect=(495, 495, 505, 505)) is None,
+        )
+        server._state["seen"], server._state["pre_frame"] = [], None
 
         print("\n-- stale-frame guard on click()")
         # A guard that blocks everything is as useless as no guard, so the
@@ -217,6 +303,118 @@ def main():
         failures += not check("and stays in full-image coordinates", nb[1] >= TEXT_BAND[1], str(nb))
         err, out = call("diff_since_snapshot", region=[10, 10, 5, 5])
         failures += not check("an inverted region is rejected", err, out[:120])
+
+        print("\n-- run_steps(): a batch of actions in one call")
+        # A region below the single line of text and above the status bar:
+        # blank, and free of the blinking caret, so "unchanged" means it.
+        QUIET = [0, 300, 700, 500]
+
+        # Validation must happen before ANY step runs -- a script rejected
+        # halfway leaves the app in a state nobody planned. Test the predicate
+        # by proving the screen never moved, not by reading the error message.
+        # Asked of the journal, not of the pixels: an earlier version diffed
+        # the screen and failed on Notepad's blinking caret (a 1x25px box),
+        # which says nothing about whether a step ran. No script has run yet
+        # this session, so a single script:* record would be the proof.
+        err, out = call("run_steps", steps=[{"do": "type", "text": "MUST NOT APPEAR"}, {"do": "frobnicate"}])
+        failures += not check("an unknown action is rejected", err and "frobnicate" in out, out[:140])
+        _, hist = call("history", last=100, tool_name="script:")
+        ran_anyway = json.loads(hist)["records"]
+        failures += not check(
+            "and the valid step before it never ran",
+            ran_anyway == [],
+            f"{[r['tool'] for r in ran_anyway]} ran before validation rejected the script",
+        )
+        err, out = call("run_steps", steps=[{"do": "click", "x": 10}])
+        failures += not check("a step missing an argument is rejected", err and "'y'" in out, out[:140])
+        err, out = call("run_steps", steps=[{"do": "wait", "ms": 30000}, {"do": "wait", "ms": 40000}])
+        failures += not check("a script that would mostly sit waiting is rejected", err, out[:140])
+
+        err, out = call("run_steps", steps=[
+            {"do": "hotkey", "keys": ["ctrl", "a"]},
+            {"do": "key", "key": "delete"},
+            {"do": "type", "text": "batch works"},
+            {"do": "wait", "ms": 200},
+            {"do": "check", "region": list(TEXT_BAND), "expect": "changed"},
+            {"do": "check", "region": QUIET, "expect": "unchanged"},
+            {"do": "capture", "region": [0, 60, 400, 200]},
+        ])
+        rep = json.loads(out.splitlines()[0]) if not err else {}
+        failures += not check("a seven-step script runs to the end", not err and rep.get("ok") is True, out[:200])
+        failures += not check("every step is reported", rep.get("performed") == 7, str(rep.get("steps"))[:200])
+        failures += not check(
+            "the check steps confirmed what the script assumed",
+            all(s["ok"] for s in rep.get("steps", []) if s["do"] == "check"),
+            str([s.get("result") for s in rep.get("steps", []) if s["do"] == "check"])[:200],
+        )
+        # Against a full frame of the SAME screen -- whole_bytes was measured
+        # on an empty Notepad long before this, and a crop containing text can
+        # legitimately outweigh a blank window, which says nothing either way.
+        _, full_now = call("screenshot")
+        failures += not check(
+            "a capture step hands back a crop mid-script",
+            "<image" in out and image_bytes(out) * 2 < image_bytes(full_now),
+            f"{image_bytes(out)}b crop vs {image_bytes(full_now)}b for the same screen whole",
+        )
+
+        err, out = call("run_steps", steps=[
+            {"do": "wait", "ms": 100},
+            {"do": "check", "region": QUIET, "expect": "changed"},
+            {"do": "type", "text": "MUST NOT RUN"},
+        ])
+        rep = json.loads(out.splitlines()[0]) if not err else {}
+        failures += not check(
+            "a check that does not hold stops the script",
+            rep.get("stopped_at_step") == 2 and rep.get("ok") is False,
+            out[:200],
+        )
+        failures += not check("and the steps after it never ran", rep.get("performed") == 2)
+        failures += not check("and the window comes back to look at", "<image" in out)
+
+        err, out = call("run_steps", stop_on_error=False, steps=[
+            {"do": "key", "key": "not_a_real_key"},
+            {"do": "wait", "ms": 50},
+        ])
+        rep = json.loads(out.splitlines()[0]) if not err else {}
+        failures += not check(
+            "stop_on_error=false carries on past a failed step",
+            rep.get("performed") == 2 and rep.get("ok") is False and rep["steps"][0]["ok"] is False,
+            out[:200],
+        )
+
+        # The first step is the only one the guard can speak for -- and it must
+        # still speak. Everything after it acts on a screen the script itself
+        # changed, which no frame the caller has seen can vouch for.
+        call("screenshot")
+        server.input_sim.press_keys(["ctrl", "a"], hwnd=hwnd)
+        server.input_sim.press_key("delete", hwnd=hwnd)
+        server.input_sim.type_text("W" * 10, hwnd=hwnd)
+        time.sleep(0.4)
+        err, out = call("run_steps", steps=[
+            {"do": "click", "x": tx, "y": ty},
+            {"do": "type", "text": "MUST NOT RUN"},
+        ])
+        rep = json.loads(out.splitlines()[0]) if not err else {}
+        failures += not check(
+            "a stale coordinate still blocks the first step",
+            rep.get("stopped_at_step") == 1 and rep.get("performed") == 1,
+            out[:220],
+        )
+        failures += not check("and the rest of the script is abandoned", rep.get("of") == 2)
+        failures += not check("with the current screen attached", "<image" in out)
+
+        err, out = call("history", last=100, tool_name="script:")
+        script_records = json.loads(out)["records"]
+        failures += not check(
+            "each scripted step is journaled on its own",
+            len(script_records) >= 9,
+            f"{len(script_records)} script:* records",
+        )
+        failures += not check(
+            "with its own before/after frames",
+            any("before" in r and "after" in r for r in script_records),
+            str(sorted(script_records[0]))[:160],
+        )
 
         print("\n-- history()")
         err, out = call("history", last=100)
@@ -305,6 +503,41 @@ def main():
             err, out = call("release_control")
             failures += not check("asking twice says there is nothing left to give back",
                                   "nothing to give back" in out, out[:140])
+
+            # Attaching is a choice of target, not a takeover. Checked with
+            # someone else's window genuinely in front, because Notepad is
+            # already foreground at the top of this run and an attach that
+            # stole the desktop would look identical there.
+            print("\n-- attaching does not take the desktop; control does")
+            overlay = server.get_overlay()
+            overlay.untrack()
+            time.sleep(0.3)
+            err, out = call("attach_window", hwnd=hwnd)
+            time.sleep(0.4)
+            failures += not check(
+                "attach leaves the person's window in front",
+                not err and win32gui.GetForegroundWindow() == their_hwnd,
+                f'foreground is "{win32gui.GetWindowText(win32gui.GetForegroundWindow())}"')
+            failures += not check("and draws no outline yet",
+                                  overlay._tracked_hwnd is None)
+            err, out = call("screenshot")
+            failures += not check(
+                "the attached window is readable without ever taking it",
+                not err and "<image" in out
+                and win32gui.GetForegroundWindow() == their_hwnd, out[:120])
+            failures += not check("still no outline after reading it",
+                                  overlay._tracked_hwnd is None)
+            err, out = call("click", x=300, y=300, force=True)
+            time.sleep(0.4)
+            failures += not check("the first input raises it by itself",
+                                  not err and win32gui.GetForegroundWindow() == hwnd, out[:120])
+            failures += not check("and that is when the outline appears",
+                                  overlay._tracked_hwnd == hwnd,
+                                  f"tracking {overlay._tracked_hwnd}, attached {hwnd}")
+            call("release_control")
+            time.sleep(0.4)
+            failures += not check("release_control puts the outline away too",
+                                  overlay._tracked_hwnd is None)
         finally:
             their_window.kill()
             time.sleep(0.5)

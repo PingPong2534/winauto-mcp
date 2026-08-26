@@ -1,72 +1,116 @@
 # Status — winauto-mcp
 
-Snapshot of right now. Overwritten, never appended — history lives in `git log`.
+Snapshot of right now. Overwritten, never appended — history lives in `git log`;
+finished behaviour lives in [SPEC.md](SPEC.md).
 
 ## Doing right now
 
-Idle. The reliability work and the mouse/keyboard-sharing work are both done,
-documented and verified; nothing is committed yet.
+Idle. Nothing is running.
 
 ## Just finished
 
-**1. Acting on the current screen, not a remembered one** (three mechanisms):
+**The "attached window feels stuck" complaint — two causes, both fixed.**
 
-- **Stale-frame guard** — `click()` and `drag()` compare the 40 px around the
-  target against the frame the caller was last *shown*. If it changed, the
-  action is refused and the current screen comes back instead, with how long
-  ago and at which step the stale view was taken. Re-issuing then goes
-  through; `force=true` skips the check.
-- **`wait_stable()`** — polls until the window (or a region of it) stops
-  repainting. Deliberately a separate tool that is never called
-  automatically, so waiting stays the model's decision.
-- **Journal** — every tool call appended to `%TEMP%\winauto-mcp\<session>\`
-  with before/after JPEG thumbnails, readable back via `history()` and
-  `replay_frame()`. Failures are recorded too, not just successes.
+1. **The tracking outline was the actual freeze.** `overlay.py` repainted
+   unconditionally on every 150 ms poll — `deiconify` + `geometry` +
+   `canvas.delete("all")` + redraw, on a transparent always-on-top window the
+   size of the target, for the entire session. It now compares against what is
+   already drawn and touches Tk only on a real change. Measured
+   (`tests\diag_overlay_paint.py`): **1 repaint over 3 idle seconds, was ~20**;
+   a window that moves still updates, and untracking stops it dead.
+2. **Attaching no longer takes the desktop.** `attach_window(hwnd)` now only
+   chooses the target — it does not raise the window and draws no outline. The
+   window is raised, and the outline appears, at the **first input**, via a
+   control hook in `window_manager`. `release_control()` puts both back.
+   `take_control=true` restores the old immediate behaviour when a person
+   should see what is about to be driven. The outline now means "being driven
+   right now" rather than "bookmarked".
 
-**2. Sharing the mouse, keyboard and desktop with whoever is at the machine**
-— answering "เป็นไปได้ไหมถ้าไม่อยากให้มันแย้ง mouse กับ keyboard". The honest
-split, established by measurement rather than assertion:
+**Answering "มันจะทำให้ช้าหรือเปล่า" with numbers, not reasoning**
+(`tests\diag_attach_cost.py`): every input path in `input_sim` already called
+`bring_to_foreground` itself, so the raise was being paid twice. Deferring it
+removes one of the two rather than adding a new cost —
 
-- **Reading is now fully solved.** Capture goes through
-  `PrintWindow(PW_RENDERFULLCONTENT)` — the window renders itself — and falls
-  back to the old screen grab only when that returns nothing usable (including
-  the all-black bitmap case, which `PrintWindow` reports as success). Verified
-  against Blender 5.2 (OpenGL), the Godot 4.6 editor and Windows 11 Notepad
-  while each was fully covered.
-- **Input is not solvable** for these apps. Four posted/sent-message variants
-  (`WM_MOUSEMOVE`, `WM_LBUTTONDOWN`, `WM_CHAR`, with and without a spoofed
-  `WM_ACTIVATE`) moved **zero pixels** in all three. Godot's only reaction was
-  a title-bar brightening. True side-by-side use needs a separate session or
-  VM.
-- **Mitigation shipped instead:** `click`/`drag`/`scroll` put the pointer back
-  where the person left it (`keep_cursor=true` opts out, for modal tools that
-  keep following the mouse), and the new `release_control()` hands the
-  foreground back to the window they were using — reading the attached window
-  keeps working from behind.
+| | |
+|---|---|
+| `attach_window()` deferred | **6.0 ms** |
+| `attach_window(take_control=True)` | 26.7 ms |
+| first click after a deferred attach | 381.2 ms *(pays the raise)* |
+| next click, already in front | 369.2 ms |
 
-**Verification:** `tests\smoke.py` drives all of it against a throwaway
-Notepad — **52 checks, all passing**, including reading a window with
-Calculator parked on top of it (5% of pixels wrong via `PrintWindow` vs 24%
-for a plain screen grab) and a full `release_control()` round trip.
+≈ **9 ms faster overall**, and a read-only run never pays it at all.
 
-**Docs:** `docs/SPEC.md` written (behaviour spec for all 23 tools), `README.md`
-Design/Tools/Known-limitations updated, and the server `instructions` string
-now tells the model about staleness, `wait_stable`, the journal and giving the
-desktop back.
+Verified: **88 checks, all passed** (was 81). Seven are new and deliberately
+run with Calculator genuinely in front — attach leaves the person's window
+foreground, draws no outline, the window stays readable anyway, the first input
+raises it *and* brings the outline up, and `release_control` removes it. On the
+freshly-launched Notepad this test could not have failed, since the target is
+already foreground there.
 
-Also from a diagnostic run: a change bounding box is one box around *every*
-changed pixel, so typing one word into Notepad (text + tab marker + status
-bar) yields a near-window-wide box whose centre never changed. Documented on
-`changed_bbox` and `diff_since_snapshot`, and `diff_since_snapshot` gained a
-`region` argument so the model can narrow a sprawling box down.
+## Previously finished (same uncommitted branch)
+
+Two features asked for to cut the cost of driving a familiar app, on branch
+`screen-freshness-and-desktop-sharing` — **written and verified, not yet
+committed** (the branch's previous work is committed as `9f63b8e`):
+
+- **`capture_region(x1, y1, x2, y2)`** — screenshot one rectangle instead of
+  the whole window, returning a header with the region captured and the offset
+  to add back to get client coordinates. Measured **4,244 bytes against 26,404**
+  for the same moment's full frame.
+- **`run_steps(steps, delay_ms, stop_on_error)`** — up to 40 actions in one
+  call (`click`, `drag`, `scroll`, `type`, `key`, `hotkey`, `click_element`,
+  `wait`, `wait_stable`, `capture`, `check`). The whole script is validated
+  before any of it runs, each step is journaled separately as `script:<action>`
+  with its own before/after frames, and a `check` step stops a run whose
+  prediction turned out wrong instead of driving the app further.
+- **The staleness guard was rewritten first, before either of those**, because
+  a naive crop tool would have silently defeated it — the guard held one
+  whole-window frame, so a partial capture would have replaced it with a fresh
+  full grab, and every later comparison would have been a fresh frame against
+  itself. It now keeps the last 8 *views* (rectangle + frame + when), so
+  looking at a toolbar certifies clicks in that toolbar and nowhere else, and a
+  coordinate in a part of the window never looked at this run is refused with
+  the list of rectangles that *were* looked at. This also fixed a pre-existing
+  bug where `locate_in_region` blinded the guard for the rest of the window.
+
+**Verification of those two:** the checks that were hard to get honest — an unknown action is
+rejected *with nothing performed*, proven by asking the journal for `script:*`
+records rather than by looking for an absence of change on screen (Notepad's
+blinking caret is enough to fake a diff); and the crop-is-cheaper claim
+compares two frames taken at the same moment rather than against a byte count
+measured earlier on a differently-populated window.
+
+**Docs updated in the same change:** `README.md` (Design bullets, two Tools
+rows, two Known-limitations entries), `docs/SPEC.md` (`capture_region`,
+`run_steps`, the region-scoped "seen" rule, per-step journaling), and the
+server's `instructions=` string so the calling model is told to prefer a crop
+for a spot check and that only step 1 of a script is guarded.
+
+**Trade-off accepted deliberately, not overlooked:** `run_steps` can only guard
+its first step — steps 2..n act on a screen the script itself changed, which
+the caller has never been shown, so their coordinates are a prediction. The
+recovery path is the per-step journal, not prevention. Stated in both README
+and SPEC rather than left implicit.
 
 ## Waiting on the user
 
-- **Nothing is committed.** The whole of the above is uncommitted on `master`.
+- **Commit/push the new work?** Uncommitted: `server.py`, `overlay.py`,
+  `window_manager.py`, `tests/smoke.py`, `README.md`, `docs/SPEC.md`,
+  `docs/STATUS.md`, plus two new diagnostics
+  (`tests/diag_overlay_paint.py`, `tests/diag_attach_cost.py`).
+- **`F:\knowledge` commit decision**, still unanswered.
+  `development/windows-background-capture-and-input.md` is written and
+  cross-linked but uncommitted, because that repo's `README.md` diff also
+  carries ~13 lines of unrelated in-flight work and index entries pointing at
+  still-untracked files. The options put to the user: (1) add `node_modules/`
+  to `.gitignore` and commit everything (my recommendation), (2) commit only
+  the two `development/*.md` files, (3) leave it.
+- **PR for this branch?** It is pushed but no PR is open — open one, or merge
+  to `master` directly?
 - **PR #1 "update doc of codex"** (branch `update_doc`, +39/−0) is open and
   unreviewed — review the diff, or merge as-is?
 - Whether `tests\diag_stability.py`, `tests\diag_typing.py` and the three
   `tests\spike_background*.py` scripts stay in the repo. They are diagnostics,
   not tests: they print measurements and assert nothing. Each earned its keep
-  by overturning a wrong assumption, and `docs/SPEC.md` and the README already
-  cite them as the reproducible source of the measured numbers.
+  by overturning a wrong assumption, and `docs/SPEC.md` and the README cite
+  them as the reproducible source of the measured numbers.
