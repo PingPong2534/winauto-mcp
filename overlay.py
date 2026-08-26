@@ -46,6 +46,8 @@ class Overlay:
         self.canvas = tk.Canvas(self.root, bg="black", highlightthickness=0, bd=0)
         self.canvas.pack(fill="both", expand=True)
         self.root.withdraw()
+        # Before the window is ever mapped, so there is no first showing during
+        # which it could take the foreground.
         self._deny_activation()
         self._ready.set()
         self._tick()
@@ -59,15 +61,52 @@ class Overlay:
         instead of the app being driven. An outline is a decoration; if it
         holds the foreground then keystrokes are aimed at a rectangle, and the
         window the person was using is never handed back to them.
+
+        The first version of this asked Tk for the handle with `wm_frame()`,
+        and that is the wrong window. Measured 2026-08-26 with the outline
+        visible on screen: the `TkTopLevel` actually being displayed had
+        WS_EX_NOACTIVATE *clear*, while the handle the code had marked was a
+        different window entirely. So the fix was not doing what it claimed,
+        and the diagnostic that covered it passed anyway -- it is timing
+        dependent, and it happened to pass the day it was written.
+
+        What does work, measured the same day: `winfo_id()` walked up with
+        GA_ROOT, called on the Tk thread. While the window is still withdrawn
+        that resolves to handle X, and the window that later appears on screen
+        is also X. So the style can be set before the window is ever mapped,
+        which is what makes it airtight rather than a race -- there is no first
+        showing during which the outline is still allowed the foreground.
+
+        Called again on the show path as a cheap safety net, in case Tk ever
+        recreates the window: it is idempotent, and _redraw only runs when the
+        outline actually needs repainting.
+
+        Read from the Tk thread only. Tk is not thread-safe, and calling
+        wm_frame()/winfo_id() from elsewhere returns a different handle again
+        -- which is how the wrong window got marked in the first place.
         """
         try:
-            self._hwnd = int(self.root.wm_frame(), 16)
-            style = win32gui.GetWindowLong(self._hwnd, win32con.GWL_EXSTYLE)
-            win32gui.SetWindowLong(
-                self._hwnd, win32con.GWL_EXSTYLE, style | win32con.WS_EX_NOACTIVATE
-            )
+            hwnd = self.root.winfo_id()
+            hwnd = win32gui.GetAncestor(hwnd, win32con.GA_ROOT) or hwnd
+            style = win32gui.GetWindowLong(hwnd, win32con.GWL_EXSTYLE)
+            if not style & win32con.WS_EX_NOACTIVATE:
+                win32gui.SetWindowLong(
+                    hwnd, win32con.GWL_EXSTYLE, style | win32con.WS_EX_NOACTIVATE
+                )
+            self._hwnd = hwnd
         except Exception:  # noqa: BLE001 - a cosmetic overlay must never fail
-            self._hwnd = None
+            pass  # keep whatever handle we had; a stale one is better than none
+
+    @property
+    def hwnd(self):
+        """The outline's own window handle, or None if it could not be found.
+
+        Exposed so that anything enumerating windows can leave the outline out
+        by name rather than by guessing at a class or excluding this process
+        wholesale -- the outline is the one window of ours that is ever visible,
+        and it is a decoration, not something an app popped up.
+        """
+        return getattr(self, "_hwnd", None)
 
     def _tick(self):
         try:
@@ -115,6 +154,7 @@ class Overlay:
             return
         self._drawn = state
         self.root.deiconify()
+        self._deny_activation()
         self.root.geometry(f"{width}x{height}+{left}+{top}")
         self.canvas.config(width=width, height=height)
         self.canvas.delete("all")

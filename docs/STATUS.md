@@ -5,85 +5,92 @@ finished behaviour lives in [SPEC.md](SPEC.md).
 
 ## Doing right now
 
-Idle. The focus-return feature is finished, documented and **open as
-[PR #4](https://github.com/PingPong2534/winauto-mcp/pull/4)** on branch
-`focus-return` — 13 files, +1204/−103, not yet reviewed or merged. `master` does
-not have any of it.
+Idle. Branch `focus-return`, **uncommitted**: the new `hover` tool, the pointer
+hold behind it, an overlay fix, and the SPEC entries for all of it.
 
-**Everything is green:**
+**Everything run is green:**
 
 | | |
 |---|---|
-| `tests\diag_focus_return.py` | **18/18.** Creates its own two windows, so it cannot leak one and nothing on the desktop can perturb it. The hand-back fires; refuses while a menu is open without forgetting what it owes; refuses if the person already moved; works through the real `mcp.call_tool` path; `keep_foreground(true)` stops it. |
-| `tests\smoke.py` | **109/109** (was 106). |
-| `tests\test_input_guard.py` | **56/56.** |
+| `tests\diag_hover.py` | **18/18.** Creates its own window with a real Win32 tooltip on it. |
+| `tests\test_input_guard.py` | **88/88** (was 56). |
+| `tests\probe_overlay_activation.py` | **19/19.** |
+| `tests\probe_mouse_lock.py` | **6/6.** |
+| `tests\diag_focus_return.py` | **18/18, five runs in a row** — it was flaky at 16/18 until the overlay fix below. |
+
+`tests\smoke.py` has **not** been run since these changes, on purpose: it
+launches Notepad, which restores the 55 leaked windows (see below). It is the
+one gap in the current green.
 
 ## Just finished
 
-**A real bug the diagnostic caught, found by measuring rather than guessing:
-the green outline was stealing the foreground.** Two checks failed reporting a
-handle that was neither the person's window nor the app's; printing its class
-named it — `TkTopLevel`, the overlay itself. `root.deiconify()` activates the
-window it shows, so the outline took the foreground away from the very window
-it was outlining. A decoration holding the foreground means keystrokes are
-aimed at a rectangle, and the hand-back correctly concluded "the person has
-moved on" and refused. `overlay.py` now sets `WS_EX_NOACTIVATE` on the Tk
-toplevel, which was enough on its own: 16/18 → **18/18**.
+**`hover(x, y, dwell_ms=700, force=False)`** — rest the pointer somewhere, wait,
+photograph what the app shows, put the pointer back. Four things were measured
+first and each one changed the design:
 
-**Win11 Notepad restores its unsaved windows when it is next launched.** The
-`taskkill` did not delete them. Running `tests\smoke.py` launched `notepad.exe`
-at 13:24:27 today and **56 windows came back**, the whole leaked set plus the
-person's `*[ครุ่นคิด]…` note. Read back through UI Automation, that note is
-byte-identical to the rescued copy on the Desktop, so nothing is lost — but it
-means the leak cannot be cleaned up by killing anything.
+- **A screen grab, not `PrintWindow`.** A tooltip is its own top-level window
+  and `PrintWindow` renders one window, so the usual capture path returns a
+  picture with no tooltip in it. Confirmed by looking at both PNGs.
+- **The pointer is genuinely pinned**, not merely hidden from apps: a
+  `WH_MOUSE_LL` hook returning 1 leaves the cursor where it was when a move to a
+  far corner is sent. `ClipCursor` was rejected — it is system-wide state owned
+  by no process, so a crash mid-hold would trap a stranger's pointer; Windows
+  tears a dead process's hooks down for free.
+- **Popup text is read through UIA, not transcribed from pixels** — a tooltip's
+  `Name` is exactly the string the app set, so a caller can assert on it.
+- **A hover image marks nothing as seen.** I had it marking the frame as looked
+  at until the two capture paths were compared: outside the tooltip they differ
+  on 0.87 % of pixels, worst channel delta 245, spread across 100 rows and not
+  explained by edges. Unexplained disagreement plus a picture of a transient is
+  not a basis for aiming a click, so `hover` now tells callers to `screenshot()`
+  first.
 
-**The leak is fixed at source in `smoke.py`, and now asserted rather than
-hoped for.** Two separate faults, both measured first in
-`tests\probe_notepad_lifecycle.py`:
+**Yesterday's overlay fix was wrong and had been believed for a day.** It set
+`WS_EX_NOACTIVATE` on the handle from Tk's `wm_frame()`, which is a *different
+window* — measured with the outline on screen, the visible `TkTopLevel` had the
+style clear. The 18/18 that shipped it was luck, and `diag_focus_return.py` went
+back to 16/18 today with the outline holding the foreground again. What works:
+`winfo_id()` walked up with `GA_ROOT`, **on the Tk thread**, which resolves the
+right handle even while the window is withdrawn — so the style is applied before
+the window is ever mapped and there is no first showing to race.
+`tests\probe_overlay_activation.py` now asks this of the window actually on
+screen, across three show/hide cycles.
 
-- It picked its target with `"notepad" in process`, i.e. *whichever Notepad
-  window enumerated first*. Harmless on an empty desktop, data loss on this
-  one — it would have attached to one of 56 and typed into an unsaved note. It
-  now takes only a handle that appeared **after** it asked for one, and refuses
-  outright if none does.
-- It closed nothing. `proc.kill()` kills the stub. Measured instead: undoing
-  the typing clears Notepad's `*` modified marker, and Alt+F4 on an unmodified
-  document closes with no save prompt to answer. The teardown refuses in both
-  directions — no key is sent at all if the window cannot be focused (an Alt+F4
-  aimed at whatever is in front would close somebody's app), and the window is
-  left open if the marker will not clear, because a leaked window is a nuisance
-  and a wrongly-answered save prompt is lost work. Two consecutive runs:
-  **56 before, 56 after.**
+**An honest gap in `probe_mouse_lock.py`:** it reports `genuinely-human events
+seen: 0`. Every event Python can send is injected, so a physical hand cannot be
+scripted; the probe stands in for one with a foreign signature. The real-hand
+path is inferred — it reaches the same decision by the same route and differs
+only in a flag the decision never reads.
 
 ## Waiting on the user
 
-- **Notepad's saved session still holds all 56 windows.** The desktop is clear
-  — `taskkill /PID 32480 /F` on 2026-08-26 left 0 windows and 0 processes — but
-  that is cosmetic: `LocalState\TabState` under
-  `Microsoft.WindowsNotepad_8wekyb3d8bbwe` still contains **56 files (5 KB)**,
-  and the next launch of Notepad by anything restores them, exactly as the last
-  `smoke.py` run did. So the next `smoke.py` run will bring 55 junk windows
-  back with it. Emptying that folder is what makes it permanent, and it is
-  irreversible; both dumps of the note are on the Desktop and verified
-  byte-identical, but nothing there will be deleted without a decision.
-- **Nine more scripts still leak the same way** — `diag_typing.py`,
-  `diag_stability.py`, `diag_keyboard_block.py`, `diag_overlay_paint.py`,
-  `diag_attach_cost.py`, `probe_popup_detect.py`, `probe_notepad_text.py` and
-  the three `spike_background*.py`. `smoke.py`'s `notepad_hwnds()`,
-  `wait_for_new_notepad()` and `close_notepad()` are the fix, ready to be
-  reused; whether it is worth doing depends on whether the diagnostics stay
-  (below).
+- **Nothing here is committed yet.** Six modified files plus four new test
+  scripts on `focus-return`. Say the word and it goes up.
+- **[PR #4](https://github.com/PingPong2534/winauto-mcp/pull/4) is still open**
+  and unmerged — the focus-return work. This branch has now grown past it.
+- **Notepad's saved session still holds 56 windows.** The desktop is clear, but
+  `LocalState\TabState` under `Microsoft.WindowsNotepad_8wekyb3d8bbwe` still has
+  **56 files (5 KB)**, and the next launch of Notepad by anything restores them
+  — which is why `smoke.py` has not been run. Emptying that folder is
+  irreversible; both dumps of the person's note are on the Desktop and verified
+  byte-identical, but nothing will be deleted without a decision.
+- **Nine more scripts still leak Notepad windows the same way** —
+  `diag_typing.py`, `diag_stability.py`, `diag_keyboard_block.py`,
+  `diag_overlay_paint.py`, `diag_attach_cost.py`, `probe_popup_detect.py`,
+  `probe_notepad_text.py` and the three `spike_background*.py`. `smoke.py`'s
+  `notepad_hwnds()` / `wait_for_new_notepad()` / `close_notepad()` are the fix,
+  ready to be reused.
+- **Three incident scripts** — `rescue_notepad_text.py`,
+  `cleanup_leaked_notepads.py`, `probe_notepad_text.py` — written to deal with
+  that leak. Keep them in the repo or delete them?
 - **`F:\knowledge` commit decision**, still unanswered.
   `development/windows-background-capture-and-input.md` is written and
   cross-linked but uncommitted, because that repo's `README.md` diff also
-  carries ~13 lines of unrelated in-flight work and index entries pointing at
-  still-untracked files. Options put to the user: (1) add `node_modules/` to
-  `.gitignore` and commit everything (my recommendation), (2) commit only the
-  two `development/*.md` files, (3) leave it. Three findings from this session
-  belong in that doc and are not yet written there: menu mode
+  carries ~13 lines of unrelated in-flight work. Options put to the user: (1)
+  add `node_modules/` to `.gitignore` and commit everything (my
+  recommendation), (2) commit only the two `development/*.md` files, (3) leave
+  it. Four findings belong in that doc and are not yet written there: menu mode
   (`GUI_INMENUMODE`) is sticky per thread and never clears; Win11 Notepad puts
   every window in one process *and* restores them after a kill; a Tk overlay
-  steals the foreground unless it is marked `WS_EX_NOACTIVATE`.
-- Whether the diagnostics stay in the repo — they print measurements and mostly
-  assert nothing, but each earned its keep by overturning a wrong assumption,
-  and `docs/SPEC.md` and the README cite them as the source of measured numbers.
+  needs `WS_EX_NOACTIVATE` on the `winfo_id()`+`GA_ROOT` window, resolved on the
+  Tk thread, before first map; and `PrintWindow` cannot capture tooltips.

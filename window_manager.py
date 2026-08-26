@@ -212,6 +212,42 @@ def a_menu_is_open() -> bool:
     return bool(found)
 
 
+def visible_top_levels(exclude=()):
+    """Every visible top-level window, as {hwnd: (class, rect)}.
+
+    Snapshotted either side of a hover so that what the hover *raised* can be
+    named by subtraction, rather than by keeping a list of the classes popups
+    are allowed to have. A Win32 tooltip is `tooltips_class32`, a classic menu
+    is `#32768`, a WinUI flyout is neither -- and the point of hovering is
+    usually to find out which of those an unfamiliar app uses.
+
+    `exclude` is a set of handles to leave out -- in practice the green
+    outline, which is a decoration of ours and not something the app popped up.
+    Handles, not "windows belonging to this process": the tests drive hover
+    against a window they create themselves, and excluding our own process
+    would blind the only check that the reporting works at all.
+    """
+    exclude = set(exclude)
+    found = {}
+
+    def visit(hwnd, _):
+        if hwnd in exclude or not win32gui.IsWindowVisible(hwnd):
+            return True
+        try:
+            rect = win32gui.GetWindowRect(hwnd)
+            if rect[2] > rect[0] and rect[3] > rect[1]:
+                found[hwnd] = (win32gui.GetClassName(hwnd), rect)
+        except win32gui.error:
+            pass
+        return True
+
+    try:
+        win32gui.EnumWindows(visit, None)
+    except win32gui.error:
+        pass
+    return found
+
+
 def hand_back_foreground():
     """Give the person their window back now that an action has finished.
 
