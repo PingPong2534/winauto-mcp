@@ -10,6 +10,9 @@ import threading
 
 import tkinter as tk
 
+import win32con
+import win32gui
+
 from window_manager import get_client_rect_screen, window_exists
 
 BORDER_COLOR = "#00FF66"
@@ -43,9 +46,28 @@ class Overlay:
         self.canvas = tk.Canvas(self.root, bg="black", highlightthickness=0, bd=0)
         self.canvas.pack(fill="both", expand=True)
         self.root.withdraw()
+        self._deny_activation()
         self._ready.set()
         self._tick()
         self.root.mainloop()
+
+    def _deny_activation(self):
+        """Tell Windows this window may never hold the foreground.
+
+        Measured 2026-08-26: showing the outline activated it. After a tool
+        call the foreground window was class `TkTopLevel` -- the outline --
+        instead of the app being driven. An outline is a decoration; if it
+        holds the foreground then keystrokes are aimed at a rectangle, and the
+        window the person was using is never handed back to them.
+        """
+        try:
+            self._hwnd = int(self.root.wm_frame(), 16)
+            style = win32gui.GetWindowLong(self._hwnd, win32con.GWL_EXSTYLE)
+            win32gui.SetWindowLong(
+                self._hwnd, win32con.GWL_EXSTYLE, style | win32con.WS_EX_NOACTIVATE
+            )
+        except Exception:  # noqa: BLE001 - a cosmetic overlay must never fail
+            self._hwnd = None
 
     def _tick(self):
         try:

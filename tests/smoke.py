@@ -22,7 +22,11 @@ from mcp.server.mcpserver.exceptions import ToolError
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.stdout.reconfigure(encoding="utf-8")
 
+import win32gui  # noqa: E402
+
+import input_sim  # noqa: E402
 import server  # noqa: E402
+import window_manager  # noqa: E402
 
 
 def call(name, **kwargs):
@@ -80,6 +84,81 @@ def close_calculators(before, timeout=8.0):
         subprocess.run(["taskkill", "/PID", str(pid), "/F"], capture_output=True)
 
 
+def notepad_hwnds():
+    """Every Notepad window on the desktop right now."""
+    return {w["hwnd"] for w in server.window_manager.list_windows()
+            if "notepad" in w["process"].lower()}
+
+
+def wait_for_new_notepad(before, timeout=25.0):
+    """A Notepad window that was not open before, or None.
+
+    Only a window that appeared *after* we asked for one is ours to type into.
+    This used to match on the process name alone, which picks whichever Notepad
+    window enumerates first -- fine when the desktop has none, a data-loss bug
+    when it has some. On 2026-08-26 it would have attached to one of 56, and
+    typed into a note that had never been saved.
+
+    The wait is generous on purpose: Windows 11 Notepad restores every window
+    it had open when it last ran, so a cold start with a large session can take
+    many seconds before it gets round to opening the new one.
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        new = notepad_hwnds() - before
+        if new:
+            return sorted(new)[0]
+        time.sleep(0.4)
+    return None
+
+
+def close_notepad(hwnd, max_undo=80):
+    """Put back the Notepad window this test opened. True if it is gone.
+
+    Undo until the document is unmodified -- Notepad marks modified with a "*"
+    in the title -- and only then Alt+F4. Measured in
+    `probe_notepad_lifecycle.py`: undoing back to empty clears the marker, and
+    Alt+F4 on an unmodified document closes with no save prompt to answer.
+
+    Everything before that is the reason this is not simply `proc.kill()`:
+    `notepad.exe` is a stub that hands off and exits, `WM_CLOSE` is ignored,
+    and killing the host process does not even work as a last resort, because
+    Windows 11 Notepad restores every window it had open the next time it runs.
+
+    Refuses rather than forces, in both directions. If the window cannot be
+    focused, no key is sent at all -- an Alt+F4 aimed at whatever happens to be
+    in front would close somebody's application. If the modified marker will
+    not clear, the window is left open rather than raising a save prompt with
+    nobody there to answer it: a leaked window is a nuisance, a wrongly
+    answered save prompt is lost work.
+    """
+    if not hwnd or not win32gui.IsWindow(hwnd):
+        return True
+    window_manager.bring_to_foreground(hwnd)
+    time.sleep(0.6)
+    if win32gui.GetForegroundWindow() != hwnd:
+        print("  [warn] could not focus our Notepad window; leaving it open "
+              "rather than sending Alt+F4 to whatever is in front")
+        return False
+
+    for _ in range(max_undo):
+        if not win32gui.GetWindowText(hwnd).startswith("*"):
+            break
+        input_sim.press_keys(["ctrl", "z"])
+        time.sleep(0.12)
+
+    if win32gui.GetWindowText(hwnd).startswith("*"):
+        print("  [warn] the document is still modified; leaving the window open "
+              "rather than raising a save prompt")
+        return False
+    if win32gui.GetForegroundWindow() != hwnd:
+        return False
+
+    input_sim.press_keys(["alt", "f4"])
+    time.sleep(1.2)
+    return not win32gui.IsWindow(hwnd)
+
+
 def check(label, condition, detail=""):
     print(f"  [{'PASS' if condition else 'FAIL'}] {label}{(' -- ' + detail) if detail else ''}")
     return bool(condition)
@@ -87,19 +166,13 @@ def check(label, condition, detail=""):
 
 def main():
     failures = 0
+    notepads_before = notepad_hwnds()
     proc = subprocess.Popen(["notepad.exe"])
     try:
-        time.sleep(1.5)
-        hwnd = next(
-            (
-                w["hwnd"]
-                for w in server.window_manager.list_windows()
-                if w["pid"] == proc.pid or "notepad" in w["process"].lower()
-            ),
-            None,
-        )
+        hwnd = wait_for_new_notepad(notepads_before)
         if hwnd is None:
-            print("  [FAIL] could not find the Notepad window we launched")
+            print(f"  [FAIL] no new Notepad window appeared ({len(notepads_before)} were "
+                  "already open); refusing to type into one that is not ours")
             return 1
 
         print("\n-- attach + journal session")
@@ -618,7 +691,25 @@ def main():
                 f'hwnd={their_hwnd} "{win32gui.GetWindowText(their_hwnd)}"',
             )
             call("screenshot")
+
+            # The default: an action raises the target to act on it and hands
+            # the desktop straight back, so a keystroke typed in the gap between
+            # two actions lands in the window the person is looking at instead
+            # of being fed into the app being driven.
             call("click", x=300, y=300, force=True)
+            time.sleep(0.6)
+            failures += not check(
+                "an action hands the foreground straight back afterwards",
+                win32gui.GetForegroundWindow() == their_hwnd,
+                f'foreground is "{win32gui.GetWindowText(win32gui.GetForegroundWindow())}"')
+
+            # ...and that it was raised at all is a separate promise, checked
+            # by asking for the behaviour that suppresses the hand-back. Doing
+            # it this way round means neither check can pass by accident: the
+            # only difference between them is the switch.
+            call("keep_foreground", enabled=True)
+            call("click", x=300, y=300, force=True)
+            time.sleep(0.4)
             failures += not check("acting on the attached window takes the foreground",
                                   win32gui.GetForegroundWindow() == hwnd)
             err, out = call("release_control")
@@ -633,6 +724,7 @@ def main():
             err, out = call("release_control")
             failures += not check("asking twice says there is nothing left to give back",
                                   "nothing to give back" in out, out[:140])
+            call("keep_foreground", enabled=False)  # back to the default
 
             # Attaching is a choice of target, not a takeover. Checked with
             # someone else's window genuinely in front, because Notepad is
@@ -657,10 +749,15 @@ def main():
                 and win32gui.GetForegroundWindow() == their_hwnd, out[:120])
             failures += not check("still no outline after reading it",
                                   overlay._tracked_hwnd is None)
+            # Held on for this one check only: what is being tested is that the
+            # *first input* is the moment the window is taken, and by default
+            # that moment is over before the call returns.
+            call("keep_foreground", enabled=True)
             err, out = call("click", x=300, y=300, force=True)
             time.sleep(0.4)
             failures += not check("the first input raises it by itself",
                                   not err and win32gui.GetForegroundWindow() == hwnd, out[:120])
+            call("keep_foreground", enabled=False)
             failures += not check("and that is when the outline appears",
                                   overlay._tracked_hwnd == hwnd,
                                   f"tracking {overlay._tracked_hwnd}, attached {hwnd}")
@@ -739,8 +836,20 @@ def main():
         failures += not check("thumbnails written", any(f.endswith(".jpg") for f in files), str(files[:6]))
         size_kb = sum(os.path.getsize(os.path.join(d, f)) for f in files) / 1024
         print(f"         session dir: {d}\n         {len(files)} files, {size_kb:.0f} KB")
+
+        # Asserted, not hoped for. This test leaked its Notepad window on every
+        # run until 56 had piled up, and nothing noticed because nothing ever
+        # checked. The desktop it hands back has to be the one it was given.
+        print("\n-- the window this test opened is put back")
+        closed = close_notepad(hwnd)
+        failures += not check("our Notepad window is closed", closed)
+        failures += not check(
+            "and no Notepad window was leaked",
+            notepad_hwnds() == notepads_before,
+            f"{len(notepad_hwnds())} open now, {len(notepads_before)} before",
+        )
     finally:
-        proc.kill()
+        proc.kill()  # the stub, if it is even still alive
 
     print(f"\n{'ALL PASSED' if not failures else str(failures) + ' CHECK(S) FAILED'}")
     return 1 if failures else 0

@@ -5,95 +5,86 @@ finished behaviour lives in [SPEC.md](SPEC.md).
 
 ## Doing right now
 
-Idle. Nothing is running. The keyboard work below is **merged into `master`**
-(PR #2, merge commit `3e034f8`), which now holds all of the freshness,
-desktop-sharing, batching, region-capture and keyboard work for the first time.
-The only file left dirty is `tests\probe_notepad_text.py`, a scratch script that
-proved UI Automation reads Notepad's text exactly; it was deliberately not
-committed.
+Idle. The focus-return feature is **finished and documented**; nothing is
+committed yet, so the whole of it is still sitting in the working tree —
+`window_manager.py`, `server.py`, `overlay.py`, `tests\smoke.py`,
+`tests\diag_focus_return.py`, `tests\probe_notepad_lifecycle.py`,
+`docs/SPEC.md`, `README.md`, this file.
 
-## Just finished
-
-**Telling the person's keystrokes from the tool's, and holding theirs out while
-automation types.**
-
-The discriminator is one line. Windows' own `LLKHF_INJECTED` flag only says
-"something injected this" — an on-screen keyboard, a remote-desktop session or
-another automation tool all set it. What identifies *us* is a signature carried
-in each event's `dwExtraInfo`, which Windows delivers untouched.
-
-**A bug found by measuring rather than reading:** `dwExtraInfo` is a
-`ULONG_PTR` — a **value** — and was declared `POINTER(c_ulong)` with
-`ctypes.pointer(...)` passed in. That compiles, input works, and every event
-went out stamped with the address of a temporary: a different number each call.
-The spike printed `0x16565c56098`, `0x16565c56218`, `0x16565c55b98` and the
-field was useless for the one thing it exists for. Now a value; re-measured
-reading back `0x7a170001`.
-
-**What is stored: nothing.** Not the key, not the character, not which keys —
-only a count of "a human key event happened" and when the last one was. A
-machine-wide hook that kept key codes would be a keylogger, and the only honest
-way to promise it is not one is for the data never to exist.
-
-**Five independent ways the keyboard comes back**, because the instruction was
-*"ต้องระวัง มันค้างจนพิมอะไรไม่ได้ ต้องวางแผนปล่อยให้ด้วยตอนมีปัญหา"*: the block is a
-**lease** that expires by itself within 20 s with no release call and no working
-server needed; **three Escapes** in 1.5 s release it *and* latch it off until
-`release_keyboard()`; the **mouse is never blocked**; Windows discards a hook
-that is too slow and every hook of a process that exits; Ctrl+Alt+Del is beneath
-any hook by OS design. Nothing is installed until the first input is sent.
-
-New tools: `keyboard_status()` and `release_keyboard(enable_blocking)`.
-`run_steps` gained `stop_if_user_types` (default true) and holds the keyboard
-across the whole script rather than per step. `release_control()` and
-`detach_window()` hand it back.
-
-**Verified in three layers, none of which ever blocked the real keyboard:**
+**Everything is green:**
 
 | | |
 |---|---|
-| `tests\test_input_guard.py` | **56 checks** against synthetic events with an injected clock. Covers every release route *and* the cases where the block must stay on: three slow Escapes must not release it, an injected Escape must not (only the person can), a key already held when the block began must be let back up so it does not stick down. |
-| `tests\diag_keyboard_block.py` | **14 checks** through a real `SetWindowsHookEx` against a real Notepad. The document read back `'YZ'` → `'YZX'` → `'YZXW'`: swallowed while held, arrived once the lease expired on its own, arrived again after three Escapes cut a 20-second lease at **0.58 s**. |
-| `tests\smoke.py` | **106 checks, all passed** (was 88). The wiring: no hook exists until the first input; the keyboard is held **during** an action — sampled from another thread, 30/40 samples blocked — and released after; with blocking off, 0/40 samples and the characters still reach the app. Also the interruption path, driven by handing a synthetic human event to the same `decide()` the hook calls, from a thread, mid-script: the script stopped at step 1 of 3 with `"user_interrupted": 1`, `stopped_because` naming the person, and `stop_if_user_types=false` running it anyway. |
+| `tests\diag_focus_return.py` | **18/18.** Creates its own two windows, so it cannot leak one and nothing on the desktop can perturb it. The hand-back fires; refuses while a menu is open without forgetting what it owes; refuses if the person already moved; works through the real `mcp.call_tool` path; `keep_foreground(true)` stops it. |
+| `tests\smoke.py` | **109/109** (was 106). |
+| `tests\test_input_guard.py` | **56/56.** |
 
-The real-hook test avoids locking the keyboard by relabelling which events count
-as the person's: a character it types itself is treated as human, and anything
-typed on the real keyboard falls into a class that always passes. Verifying a
-keyboard lock by locking the keyboard is the one experiment that can leave
-nobody able to type the fix.
+## Just finished
 
-**Notepad is read back through UI Automation, not by diffing pixels** — its
-caret blinks, so "no character arrived" would still show changed pixels.
+**A real bug the diagnostic caught, found by measuring rather than guessing:
+the green outline was stealing the foreground.** Two checks failed reporting a
+handle that was neither the person's window nor the app's; printing its class
+named it — `TkTopLevel`, the overlay itself. `root.deiconify()` activates the
+window it shows, so the outline took the foreground away from the very window
+it was outlining. A decoration holding the foreground means keystrokes are
+aimed at a rectangle, and the hand-back correctly concluded "the person has
+moved on" and refused. `overlay.py` now sets `WS_EX_NOACTIVATE` on the Tk
+toplevel, which was enough on its own: 16/18 → **18/18**.
 
-**Separately: a leak found while setting the above up.** `smoke.py` launched
-Calculator with `subprocess.Popen(["calc.exe"])` and killed that handle — but
-`calc.exe` is a stub that hands off to a packaged `CalculatorApp.exe` with a
-different PID and exits, the same trap already documented for `notepad.exe` in
-this repo. Every run leaked two Calculator windows; **27 had accumulated**, and
-one of them held the foreground so firmly that `bring_to_foreground` could not
-displace it across three attempts, which is what blocked the keyboard testing in
-the first place. smoke.py now records the Calculator PIDs that existed before it
-launched one and closes only the new ones, never a Calculator the person already
-had open. Verified: 0 leaked across a full run, where the count used to rise
-by 2.
+**Win11 Notepad restores its unsaved windows when it is next launched.** The
+`taskkill` did not delete them. Running `tests\smoke.py` launched `notepad.exe`
+at 13:24:27 today and **56 windows came back**, the whole leaked set plus the
+person's `*[ครุ่นคิด]…` note. Read back through UI Automation, that note is
+byte-identical to the rescued copy on the Desktop, so nothing is lost — but it
+means the leak cannot be cleaned up by killing anything.
+
+**The leak is fixed at source in `smoke.py`, and now asserted rather than
+hoped for.** Two separate faults, both measured first in
+`tests\probe_notepad_lifecycle.py`:
+
+- It picked its target with `"notepad" in process`, i.e. *whichever Notepad
+  window enumerated first*. Harmless on an empty desktop, data loss on this
+  one — it would have attached to one of 56 and typed into an unsaved note. It
+  now takes only a handle that appeared **after** it asked for one, and refuses
+  outright if none does.
+- It closed nothing. `proc.kill()` kills the stub. Measured instead: undoing
+  the typing clears Notepad's `*` modified marker, and Alt+F4 on an unmodified
+  document closes with no save prompt to answer. The teardown refuses in both
+  directions — no key is sent at all if the window cannot be focused (an Alt+F4
+  aimed at whatever is in front would close somebody's app), and the window is
+  left open if the marker will not clear, because a leaked window is a nuisance
+  and a wrongly-answered save prompt is lost work. Two consecutive runs:
+  **56 before, 56 after.**
 
 ## Waiting on the user
 
+- **Notepad's saved session still holds all 56 windows.** The desktop is clear
+  — `taskkill /PID 32480 /F` on 2026-08-26 left 0 windows and 0 processes — but
+  that is cosmetic: `LocalState\TabState` under
+  `Microsoft.WindowsNotepad_8wekyb3d8bbwe` still contains **56 files (5 KB)**,
+  and the next launch of Notepad by anything restores them, exactly as the last
+  `smoke.py` run did. So the next `smoke.py` run will bring 55 junk windows
+  back with it. Emptying that folder is what makes it permanent, and it is
+  irreversible; both dumps of the note are on the Desktop and verified
+  byte-identical, but nothing there will be deleted without a decision.
+- **Nine more scripts still leak the same way** — `diag_typing.py`,
+  `diag_stability.py`, `diag_keyboard_block.py`, `diag_overlay_paint.py`,
+  `diag_attach_cost.py`, `probe_popup_detect.py`, `probe_notepad_text.py` and
+  the three `spike_background*.py`. `smoke.py`'s `notepad_hwnds()`,
+  `wait_for_new_notepad()` and `close_notepad()` are the fix, ready to be
+  reused; whether it is worth doing depends on whether the diagnostics stay
+  (below).
 - **`F:\knowledge` commit decision**, still unanswered.
   `development/windows-background-capture-and-input.md` is written and
   cross-linked but uncommitted, because that repo's `README.md` diff also
   carries ~13 lines of unrelated in-flight work and index entries pointing at
-  still-untracked files. The options put to the user: (1) add `node_modules/`
-  to `.gitignore` and commit everything (my recommendation), (2) commit only
-  the two `development/*.md` files, (3) leave it. The keystroke-attribution
-  finding above **has now been written into that doc** — the `ULONG_PTR` trap
-  with the observed junk addresses, the lease/panic-chord shape, and how to
-  test a keyboard lock without locking the keyboard — so the doc is a further
-  reason to resolve this, not a reason to wait.
-- Whether the diagnostics stay in the repo — `tests\diag_stability.py`,
-  `tests\diag_typing.py`, `tests\diag_overlay_paint.py`,
-  `tests\diag_attach_cost.py`, `tests\diag_keyboard_block.py` and the three
-  `tests\spike_background*.py` scripts, plus `tests\spike_input_attribution.py`.
-  They print measurements and mostly assert nothing. Each earned its keep by
-  overturning a wrong assumption, and `docs/SPEC.md` and the README cite them as
-  the reproducible source of the measured numbers.
+  still-untracked files. Options put to the user: (1) add `node_modules/` to
+  `.gitignore` and commit everything (my recommendation), (2) commit only the
+  two `development/*.md` files, (3) leave it. Three findings from this session
+  belong in that doc and are not yet written there: menu mode
+  (`GUI_INMENUMODE`) is sticky per thread and never clears; Win11 Notepad puts
+  every window in one process *and* restores them after a kill; a Tk overlay
+  steals the foreground unless it is marked `WS_EX_NOACTIVATE`.
+- Whether the diagnostics stay in the repo — they print measurements and mostly
+  assert nothing, but each earned its keep by overturning a wrong assumption,
+  and `docs/SPEC.md` and the README cite them as the source of measured numbers.

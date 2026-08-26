@@ -53,6 +53,35 @@ pressed a key returns its normal result plus a note that N key events were held
 out, and `run_steps` stops at that step by default. Someone reaching for the
 keyboard mid-run wants the machine more than the script does.
 
+## Sharing the foreground with the person
+
+Sending input requires the target window to be in front, so an action raises
+it. **When the action finishes, the desktop is handed straight back** to
+whatever window was in front beforehand — so a key typed in the gap between two
+actions lands in the window the person is looking at, and not in the middle of
+the app being driven. It happens after every tool that sends input, and **once**
+at the end of `run_steps` rather than between its steps, since a script is one
+interaction however many steps it has.
+
+The refusals matter more than the hand-back:
+
+| | |
+|---|---|
+| **Only what it took** | The window handed back to is the one automation itself displaced. A window nobody displaced is never raised. |
+| **Not while a menu is open** | A menu closes the moment its owner loses focus, so handing back would undo the click that opened it. What is owed is **not forgotten** — the hand-back happens when a later action ends with the menu closed. An open menu also blocks any foreground change desktop-wide, so this is correctness, not only manners. |
+| **Not if the person moved on** | If a third window took the foreground after automation did, the person has already gone elsewhere; what is owed is forgotten rather than yanked back. |
+| **Not if the window is gone** | A window that has closed or been hidden is dropped silently. |
+| **Never fails an action** | A hand-back that cannot happen changes nothing about the action's result. |
+
+**Known blind spot.** "A menu is open" is answered from menus *Windows* owns.
+A menu the app draws itself — XAML/WinUI, Electron, Qt, a game's own UI — is
+paint inside the window and is invisible here; Windows 11 Notepad's own File
+menu is one. For those, `keep_foreground(true)`.
+
+**The tracking outline never holds the foreground.** It is a decoration; if it
+did, keystrokes would be aimed at a rectangle and the person's window would
+never come back.
+
 ## Reading the screen
 
 ### `list_windows()`
@@ -221,6 +250,22 @@ note on its normal result if they pressed a key while it did.
   attachment survives; **reading the window keeps working from behind**. It is
   the caller's job not to call this mid-interaction, because a menu opened by
   the previous click closes when its window loses focus.
+- **Against the automatic hand-back** Unconditional where that one refuses: it
+  asks none of the questions above, because the caller has said the interaction
+  is over. It also releases the keyboard and removes the outline, which the
+  hand-back does not.
+
+### `keep_foreground(enabled)`
+- **Output** confirmation stating whether actions will hand the desktop back,
+  and, when switching back on, the window handed back immediately if one was
+  owed.
+- **Rules** `true` suppresses the automatic hand-back for the rest of the
+  session: actions raise the target and **leave it in front**. `false` restores
+  the default and hands back at once if a window is owed. Changes nothing about
+  the keyboard, the outline, or the attachment.
+- **What it is for** An interaction that spans several tool calls and dies if
+  focus moves between them: a Blender G/R/S transform, a rubber-band selection
+  continued in a later call, an app-drawn dropdown that cannot be detected.
 
 ### `keyboard_status()`
 - **Output** JSON: whether the block is on, how many seconds of lease remain,
@@ -247,8 +292,9 @@ note on its normal result if they pressed a key while it did.
   being read is not outlined.
 - **Rules** It is repainted only when the window's rectangle or the highlight
   boxes actually change. A window sitting still is not redrawn, no matter how
-  long the session runs; a window that moves is followed. It is click-through
-  and changes nothing about the target app.
+  long the session runs; a window that moves is followed. It is click-through,
+  **can never become the foreground window**, and changes nothing about the
+  target app.
 - **Why the rule exists** Redrawing a transparent always-on-top window the
   size of the target several times a second for a whole session is enough
   compositor work to make the tracked app stutter, and makes the outline
@@ -387,7 +433,8 @@ Every tool call is appended to a session folder under
 - **The mouse, keyboard and foreground are shared with whoever is at the
   machine.** Input cannot be delivered in the background to the apps this
   server targets (measured against Blender, the Godot editor and Notepad), so
-  a run visibly takes over the desktop while acting. Reading does not.
+  a run visibly takes over the desktop while acting, and hands it back when the
+  action ends. Reading does not take it at all.
 - **A machine-wide keyboard hook is installed once input is sent**, and it sees
   every key event on the computer, not only those going to the target window —
   that is what the mechanism is. It stores nothing and swallows only the
@@ -403,13 +450,25 @@ Every tool call is appended to a session folder under
 
 ## Verification
 
-`tests\smoke.py` drives the real tools against a throwaway Notepad it launches
-and kills, checking each behaviour above that can be checked without a human:
+`tests\smoke.py` drives the real tools against a throwaway Notepad it opens and
+closes, checking each behaviour above that can be checked without a human:
 the journal, the stale-target refusal (both as a predicate against synthetic
 frames and end to end through a real click, including a click in a part of the
 window that was never looked at), the region scoping of "seen", `wait_stable`
 against a window deliberately kept repainting, reading a window while another
 is parked on top of it, and pointer/foreground restoration.
+
+**It touches only windows it opened, and hands the desktop back as it found
+it** — asserted at the end of the run, not assumed. It takes only a window that
+appeared *after* it asked for one, rather than the first one matching the
+process name, and it closes that window by undoing its own typing until the
+document is unmodified and then sending Alt+F4, so there is no save prompt to
+answer. It refuses in both directions: no key is sent at all if the window
+cannot be focused, and the window is left open if it will not go back to
+unmodified. Neither of those existed until the test had leaked **56 Notepad
+windows**, one of which belonged to the person — and killing the process does
+not undo it, because Windows 11 Notepad restores every window it had open the
+next time it starts.
 
 It also checks the two claims made above that are easy to assert and never
 measure: that a crop really is cheaper to send than the whole window (it
@@ -422,6 +481,19 @@ enough to fake.
 The attach/outline behaviour is checked with **another application genuinely in
 front**, not on the freshly-launched target: an attach that stole the desktop
 would look identical to one that did not if the target were already foreground.
+The same setup checks both halves of the foreground promise with **one switch
+as the only difference** — by default the action ends with the other
+application back in front, and with `keep_foreground(true)` it ends with the
+driven window in front — so neither check can pass by accident.
+
+`tests\diag_focus_return.py` covers the hand-back's refusals, which are the part
+that matters and the part a live desktop cannot test reliably. It **creates its
+own two windows** rather than driving a real app: they cannot be left behind,
+and nothing else on the desktop can perturb the reading. An earlier version took
+"the person's window" to be whatever was in the foreground and was measuring the
+console window its own test runner had just opened. Alt+Space on a window of
+one's own also opens a genuine Win32 menu, which no modern app is free to
+reinterpret.
 
 The keyboard block is verified in two halves, neither of which ever blocks the
 real keyboard:

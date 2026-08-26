@@ -75,8 +75,19 @@ Windows-only. Built and tested against Python 3.12 on Windows 11.
   *input* still needs the window in front.
 - **The pointer is shared**: `click`/`drag`/`scroll` put the mouse back where
   the person left it (`keep_cursor=true` opts out, for modal tools that keep
-  following the pointer), and `release_control()` hands the foreground back to
-  the window they were using.
+  following the pointer).
+- **So is the foreground, and it is given back by itself**: input needs the
+  target window in front, so an action raises it — and hands the desktop
+  straight back when the action ends, so a key typed in the gap between two
+  actions lands where the person is looking instead of in the app being driven.
+  `run_steps` hands back once at the end, not between steps. It **refuses** to
+  hand back while a menu is open (a menu dies when its owner loses focus, and
+  an open menu blocks foreground changes desktop-wide anyway) without forgetting
+  what it owes, and **forgets** rather than yanks if the person has already
+  moved somewhere else. Menus the app draws itself — XAML/WinUI, Electron, Qt,
+  games — cannot be detected; `keep_foreground(true)` is the way to hold the
+  window for an interaction that spans several calls
+  (`tests\diag_focus_return.py`, 18 checks).
 - **Attaching is not taking over**: `attach_window` only chooses which window
   the other tools mean. It does not raise the window and draws no outline —
   the window is raised, and the green outline appears, by itself at the first
@@ -93,6 +104,11 @@ Windows-only. Built and tested against Python 3.12 on Windows 11.
   poll compares against what is already drawn and touches Tk only on a real
   change: measured 1 repaint over 3 idle seconds, against ~20 before, while a
   window that does move still updates (`tests\diag_overlay_paint.py`).
+  It also **cannot take the foreground**: showing a Tk window activates it, so
+  the outline was stealing focus from the very window it was outlining — found
+  when a focus check reported a handle that was neither the person's window nor
+  the app's, and printing its class named it. A decoration holding the
+  foreground means keystrokes are aimed at a rectangle.
 - **The keyboard is shared too, and the tool knows whose keystroke is whose**:
   every event this server sends carries a signature Windows delivers untouched,
   so a key event can be attributed to the person, to us, or to a third
@@ -134,7 +150,8 @@ Windows-only. Built and tested against Python 3.12 on Windows 11.
 | `wait_stable(timeout, settle_ms, interval, threshold, region)` | Poll until the window (or `region` of it) stops repainting for `settle_ms`. Never called automatically -- reports timing, not pixels, so take a fresh screenshot after |
 | `history(last, tool_name, failures_only)` | The steps taken so far this session, from the journal, with their arguments, results and which frames were kept |
 | `replay_frame(seq, which)` | The before/after screen image stored for step `seq` -- evidence for "what did it look like then?", downscaled, never a coordinate source |
-| `release_control()` | Put the window the person was using back in front, hide the tracking outline and release the keyboard. Reading the attached window keeps working from behind; the next action takes it again by itself |
+| `release_control()` | Put the window the person was using back in front, hide the tracking outline and release the keyboard. Unconditional, where the automatic hand-back refuses. Reading the attached window keeps working from behind; the next action takes it again by itself |
+| `keep_foreground(enabled)` | `true` stops actions handing the desktop back, so the driven window stays in front — for an interaction that spans several calls and dies if focus moves. `false` restores the default and hands back immediately if a window is owed |
 | `keyboard_status()` | Whether the block is on, how much lease is left, whether the person latched it off with three Escapes, and whether any human key event has happened -- a count and a time, **never which keys** |
 | `release_keyboard(enable_blocking=True)` | Hand the keyboard back now and clear the triple-Escape latch (the only thing that clears it). `enable_blocking=false` switches blocking off for the rest of the session |
 | `locate_in_region(x1, y1, x2, y2, threshold)` | Find exact click coordinates by pixel contrast within a small region -- returns the tight content bbox and its center. Use instead of eyeballing coordinates off a displayed screenshot crop, which has repeatedly been wrong by 50-150+ px (displayed crops can be rescaled in ways that don't map back to real source pixels) |

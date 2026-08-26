@@ -272,6 +272,18 @@ _ACTION_LEASE = 5.0
 # so the person is not let in and out between every click.
 _SCRIPT_LEASE = 15.0
 
+# Tools that end by giving the person their window back. The same set that
+# takes the foreground in order to send input -- and run_steps, which is one
+# interaction from the person's point of view no matter how many steps it has,
+# so the hand-back happens once at the end rather than between every step.
+_RETURNS_FOCUS = _HOLDING_TOOLS
+
+# Whether that hand-back happens at all. Off is for an interaction that spans
+# several tool calls and dies if focus moves between them -- Blender's G/R/S
+# transform, a rubber-band selection continued in a later call, an app-drawn
+# dropdown that a_menu_is_open() cannot see.
+_focus_return = {"enabled": True}
+
 _INTERRUPTED_NOTE = (
     " -- NOTE: the person pressed {n} key(s) while this ran, and they were held out."
     " They are trying to use the machine. Stop, call release_keyboard(), and ask"
@@ -451,6 +463,21 @@ def journaled(fn):
         after = _state["post_frame"]
         if after is None and wants_frames and error is None:
             after = _try_grab()
+
+        # Hand the desktop back the moment the action is over, so the person
+        # can type into their own window without waiting for anyone to
+        # remember to release it. After the frame above, not before: the
+        # fallback path of a capture reads the screen, and by then the screen
+        # would be showing their window instead of ours.
+        #
+        # Outside the try/except that wraps the action itself, because an
+        # action that raised took the foreground just the same -- and a failure
+        # is exactly when nobody is coming back to tidy up.
+        if name in _RETURNS_FOCUS and _focus_return["enabled"]:
+            try:
+                window_manager.hand_back_foreground()
+            except Exception:  # noqa: BLE001 - never turn a courtesy into a failure
+                pass
 
         hwnd = _state["hwnd"]
         journal.record(
@@ -1171,6 +1198,32 @@ def release_control() -> str:
         return "nothing to give back -- no window was displaced, or it has since closed"
     return (f'foreground returned to "{title}"; outline hidden; keyboard released; '
             "reading the attached window still works")
+
+
+@tool
+def keep_foreground(enabled: bool) -> str:
+    """Stop giving the person their window back after every action, or start again.
+
+    By default every action that takes the foreground hands it back the moment
+    it finishes, so the person can type into their own window during the gaps
+    without their keystrokes landing in the app being automated.
+
+    Call keep_foreground(true) before an interaction that spans several tool
+    calls and would break if focus moved between them: a Blender G/R/S
+    transform, a rubber-band selection continued in a later call, or a menu the
+    app draws itself -- Windows does not report those, so the automatic
+    hand-back cannot know to skip them. Call keep_foreground(false) afterwards.
+
+    Menus that Windows owns are already handled: the hand-back skips itself
+    while one is open, and does not lose track of the window it owes."""
+    _focus_return["enabled"] = not bool(enabled)
+    if enabled:
+        return ("holding the foreground; the person will NOT get their window back "
+                "between actions. Call keep_foreground(false) when the interaction "
+                "is over, or release_control() to hand it back now")
+    title, reason = window_manager.hand_back_foreground()
+    return ("handing the foreground back after each action again; "
+            + (f'gave it back to "{title}" now' if title else f"nothing given back now ({reason})"))
 
 
 @tool
