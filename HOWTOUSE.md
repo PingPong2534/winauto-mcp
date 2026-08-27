@@ -51,7 +51,7 @@ green outline appears, and the person's keyboard is held out — and
 
 ---
 
-## Three rules that explain most surprises
+## Four rules that explain most surprises
 
 ### 1. Coordinates are client-relative
 
@@ -101,6 +101,21 @@ they left it, and their keyboard is held out only while an action runs — with 
 `keyboard_status()` reports `latched_off_by_user`, someone reached for that
 chord. Treat it as a stop signal, not an obstacle: stop, report, ask.
 
+### 4. An "as administrator" window cannot be driven from a normal server
+
+If the target was launched with **Run as administrator** and the MCP server was
+not, Windows discards every click and keystroke sent to it — and discards them
+*without an error*. The server therefore refuses this outright instead of
+reporting a success, at `list_windows` (`"input_blocked": true`), again as a
+warning on `attach_window`, and finally as a raise on the first input call.
+
+**If you see that refusal, believe it and stop.** It is not a timing problem,
+not a focus problem, and not something a retry or a `run_steps` batch will get
+around — the three things it looks exactly like from the outside. There are two
+real fixes and no others: **have the person restart the server as
+administrator**, or **drive a different window**. Reading the window —
+`screenshot`, `capture_region`, `locate_in_region` — works normally either way.
+
 ---
 
 ## Getting coordinates right
@@ -143,6 +158,7 @@ raises if there is none.
 | **Input** | none |
 | **Output** | JSON array of `{hwnd, title, process}` for every visible top-level window |
 | **Use it** | first, always — `hwnd` values are not stable across app restarts |
+| **Watch for** | a window that also carries `"input_blocked": true` **cannot be typed into or clicked** from this server. Pick a different one, or tell the person the server has to be restarted as administrator. You can still read it |
 
 #### `attach_window(hwnd, take_control=False)`
 
@@ -152,6 +168,7 @@ raises if there is none.
 | **Output** | a line naming the window and the new journal session |
 | **Rules** | raises `no such window: <hwnd>` if it has closed |
 | **Notes** | Starts a fresh journal, so `history()` describes this run only. `take_control=true` raises the window immediately — worth it when a person is watching and should see which window is about to be driven, pointless otherwise |
+| **Read the reply** | if it ends in `WARNING -- THIS WINDOW CANNOT BE DRIVEN FROM HERE`, stop planning clicks and keystrokes now. They will all be refused. Reading works; input does not |
 
 #### `detach_window()`
 
@@ -689,7 +706,9 @@ the number worth telling someone.
 | `capture_screen()` on every loop iteration | `screenshot()` when you do not need elements; `capture_region` when you only need to check one thing |
 | Call a leak from one `heap_diff` pair | Repeat the cycle; a pair of snapshots differs by thousands of objects with nothing happening at all |
 | Watch the process's memory size to find a .NET leak | It stays high with nothing leaking and flat while leaking. Count objects after a collection |
+| Retry, re-click, or batch into `run_steps` after an `InputBlocked` refusal | Nothing sent from this server will ever reach that window. Restart the server as administrator, or drive another window |
+| Conclude "the person must be typing somewhere else" when typing has no effect | Check `list_windows` for `input_blocked` first — an elevated target looks exactly like a focus problem |
 
 ---
 
-Last updated: 2026-08-26 · 32 tools · Tested on Windows 11 Home Single Language 10.0.26200.0 · Python 3.12.10 · mcp 2.0.0
+Last updated: 2026-08-27 · 32 tools · Tested on Windows 11 Home Single Language 10.0.26200.0 · Python 3.12.10 · mcp 2.0.0

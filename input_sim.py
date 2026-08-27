@@ -88,10 +88,44 @@ KEYEVENTF_KEYUP = 0x0002
 SIGNATURE = 0x7A170001
 
 
+_user32 = ctypes.WinDLL("user32", use_last_error=True)
+_user32.SendInput.restype = ctypes.c_uint
+_user32.SendInput.argtypes = [ctypes.c_uint, ctypes.c_void_p, ctypes.c_int]
+
+
 def _send(*inputs: Input):
+    """Send events, and fail loudly if Windows did not take all of them.
+
+    The return value used to be discarded. It is worth checking, but it is
+    worth being precise about what it can and cannot tell us:
+
+    - It DOES catch the documented "blocked by another thread" case -- another
+      process holding BlockInput, or the secure desktop being up because a UAC
+      prompt is on screen. Both make every event vanish, and both are states a
+      caller needs to hear about rather than retry into.
+
+    - It does NOT catch UIPI. Sending into an elevated window from a
+      non-elevated one returns the full count with GetLastError at 0, and the
+      events are dropped afterwards, when they are routed to the higher
+      integrity thread's queue. Measured, not assumed. That case is refused
+      before it gets here -- see window_manager.bring_to_foreground.
+
+    A partial send is reported as a partial send. Half a chord or half a word
+    has already reached the app and saying "nothing happened" would be its own
+    kind of lie.
+    """
     n = len(inputs)
     arr = (Input * n)(*inputs)
-    ctypes.windll.user32.SendInput(n, ctypes.pointer(arr), ctypes.sizeof(Input))
+    sent = _user32.SendInput(n, ctypes.byref(arr), ctypes.sizeof(Input))
+    if sent != n:
+        err = ctypes.get_last_error()
+        raise OSError(
+            f"SendInput accepted {sent} of {n} events (GetLastError={err}). "
+            "Windows refused the input rather than delivering it -- usually the "
+            "secure desktop is up (a UAC prompt is showing, which nothing can "
+            "automate) or another process is holding BlockInput. "
+            f"{'Nothing was sent.' if sent == 0 else 'Part of this action was already sent.'}"
+        )
 
 
 def _mouse_input(dx, dy, flags, mouse_data=0):
