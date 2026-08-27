@@ -6,6 +6,8 @@ import win32gui
 import win32process
 import psutil
 
+import integrity
+
 
 def list_windows():
     """Return visible, non-minimized top-level windows with a title."""
@@ -27,6 +29,10 @@ def list_windows():
             process_name = psutil.Process(pid).name()
         except psutil.Error:
             process_name = "?"
+        # Asked here so a caller can avoid an undriveable window before
+        # attaching to it, rather than finding out at the first click. Costs
+        # ~3 us per window, measured -- cheap enough not to be worth caching.
+        level = integrity.process_level(pid)
         windows.append(
             {
                 "hwnd": hwnd,
@@ -34,6 +40,8 @@ def list_windows():
                 "process": process_name,
                 "pid": pid,
                 "rect": list(rect),
+                "integrity": integrity.level_name(level),
+                "input_blocked": integrity.blocks_input(level),
             }
         )
         return True
@@ -145,6 +153,21 @@ def _took_control(hwnd) -> None:
 
 
 def bring_to_foreground(hwnd):
+    # Refuse first, before anything visible happens. This is the one function
+    # every path that sends input goes through -- click, drag, scroll, type,
+    # press_key, press_keys, hover -- which makes it the only place the
+    # question "will Windows actually deliver this?" has to be asked, and the
+    # only place a future input tool cannot forget to ask it.
+    #
+    # It has to come before _took_control: drawing the green outline around a
+    # window we are about to refuse to drive would announce control we do not
+    # have. Nothing has been sent and nothing has moved when this raises.
+    level = integrity.window_level(hwnd)
+    if integrity.blocks_input(level):
+        raise integrity.InputBlocked(
+            integrity.why_blocked(level, get_window_title(hwnd), get_process_name(hwnd))
+        )
+
     # Before the early-out below: we are about to send input either way, so
     # this is the moment control is taken, whether or not a raise is needed.
     _took_control(hwnd)

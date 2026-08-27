@@ -47,6 +47,7 @@ from mcp.server.mcpserver import Image, MCPServer
 import heap
 import input_guard
 import input_sim
+import integrity
 import journal
 import location_cache
 import uia_inspect
@@ -528,10 +529,22 @@ def tool(fn):
 
 @tool
 def list_windows() -> str:
-    """List visible top-level windows that can be attached to (title, process, hwnd)."""
+    """List visible top-level windows that can be attached to (title, process, hwnd).
+
+    A window carrying "input_blocked": true runs at a higher Windows integrity
+    level than this server -- typically it was started with "Run as
+    administrator" and the server was not. You can still read such a window
+    (screenshot, capture_region, locate_in_region all work), but every click
+    and keystroke sent to it is discarded by Windows without an error, so the
+    input tools refuse it outright rather than report a success that did not
+    happen. Prefer another window, or restart the server elevated."""
     windows = window_manager.list_windows()
     return json.dumps(
-        [{"hwnd": w["hwnd"], "title": w["title"], "process": w["process"]} for w in windows],
+        [
+            {"hwnd": w["hwnd"], "title": w["title"], "process": w["process"]}
+            | ({"input_blocked": True, "integrity": w["integrity"]} if w["input_blocked"] else {})
+            for w in windows
+        ],
         ensure_ascii=False,
     )
 
@@ -560,6 +573,15 @@ def attach_window(hwnd: int, take_control: bool = False) -> str:
     # let heap_diff compare two different programs and report the difference
     # between them as growth.
     _state["heap"] = {}
+    # Said at attach because that is the earliest moment it is knowable, and
+    # the caller is about to plan a run around a window that cannot be driven.
+    # It is a warning and not a refusal: reading an elevated window works
+    # perfectly well, so refusing the attach would take away something that
+    # does work. The refusal happens at the first input call, which is the
+    # first moment anything would actually be a lie.
+    level = integrity.window_level(hwnd)
+    blocked = integrity.blocks_input(level)
+
     if take_control:
         window_manager.bring_to_foreground(hwnd)  # the hook draws the outline
     title = window_manager.get_window_title(hwnd)
@@ -568,7 +590,13 @@ def attach_window(hwnd: int, take_control: bool = False) -> str:
     # previous app's steps.
     session = journal.start_session(f"{title} (hwnd={hwnd})")
     how = "in front, outline showing" if take_control else "left as it was; reading works from behind"
-    return f'attached to "{title}" (hwnd={hwnd}) -- {how}; journal session {session}'
+    warning = (
+        f"\n\nWARNING -- THIS WINDOW CANNOT BE DRIVEN FROM HERE. "
+        f"{integrity.why_blocked(level, title, window_manager.get_process_name(hwnd))} "
+        "Do not plan a run of clicks and keystrokes against it; they will be refused."
+        if blocked else ""
+    )
+    return f'attached to "{title}" (hwnd={hwnd}) -- {how}; journal session {session}{warning}'
 
 
 @tool
@@ -1343,6 +1371,15 @@ def run_steps(steps: list[dict], delay_ms: int = 120, stop_on_error: bool = True
 
     summary = {
         "ok": stopped_at is None and all(s["ok"] for s in report),
+        # Steps ATTEMPTED, not steps that succeeded -- so a script stopped by
+        # its first step reports performed: 1 with that step's ok: false. That
+        # reads wrong, and it disagrees with the single-action refusal, which
+        # reports "performed": false for the same event. Left alone deliberately
+        # rather than fixed in passing: three assertions in tests\smoke.py
+        # encode this meaning, and smoke.py cannot currently be run (it launches
+        # Notepad, whose saved session is a pending decision). Changing a field
+        # and its tests together, with the tests unrunnable, would be a change
+        # nobody had checked. See docs\STATUS.md.
         "performed": len(report),
         "of": len(steps),
         "stopped_at_step": stopped_at,

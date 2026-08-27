@@ -14,7 +14,7 @@ running window at a time and lets a caller read it and drive it.
 | **Coordinates** | Every coordinate accepted or returned — click points, element rects, regions, highlight boxes — is relative to the attached window's **client area**, in physical pixels, matching the image `capture_screen`/`screenshot` return. Screen-coordinate translation is never the caller's problem. |
 | **Attachment** | Exactly one window is attached. Attaching replaces any previous attachment. Every tool except `list_windows` and `attach_window` fails with "no window attached" until one is. If the attached window has closed, the attachment is dropped and the call fails. |
 | **DPI** | Per-monitor DPI awareness is established before any other Win32 or graphics call, so captured pixels and clicked coordinates are in the same space on scaled displays. |
-| **Errors** | A tool that cannot do what was asked raises; the client sees an error result. Nothing fails silently, and no tool returns a success string for an action it did not perform. |
+| **Errors** | A tool that cannot do what was asked raises; the client sees an error result. Nothing fails silently, and no tool returns a success string for an action it did not perform. Where **Windows itself** performs the action silently and incompletely, the server refuses **before** calling it rather than passing the silence on — see *Windows that cannot be driven*. |
 | **Journal** | Every tool call is recorded (below), including calls that failed and actions that were refused. |
 | **What counts as "seen"** | The server tracks what the caller has actually been *shown*, as a list of views, each covering a rectangle of the window. Looking at the whole window counts for the whole window; looking at part of it counts for **that part only**. A newer view supersedes any older view it fully contains, and only the most recent 8 are kept. The stale-target guard asks "which view covers this point, and has that view's area changed since?" — so a partial look can never certify a coordinate elsewhere on screen. |
 | **Whose keystroke is whose** | Every key and mouse event this server sends carries a signature that Windows delivers untouched. A key event is attributed to the **person** only when Windows says nothing injected it; to **this server** when it carries our signature; and to **some other injector** otherwise. Windows' own "injected" flag alone cannot answer this — an on-screen keyboard, a remote-desktop session and another automation tool all set it. |
@@ -128,6 +128,11 @@ asserted of the window actually visible, across repeated show/hide cycles.
 ### `list_windows()`
 - **Output** JSON list of visible, non-minimized, titled top-level windows:
   `hwnd`, `title`, `process`, `pid`, `rect`.
+- **Rules** A window this server **cannot send input to** additionally carries
+  `input_blocked: true` and `integrity` (the target's level, e.g. `high`), so a
+  caller can avoid it before attaching rather than discovering it at the first
+  click. Windows that can be driven carry neither field — the common case costs
+  nothing to report. See *Windows that cannot be driven* below.
 
 ### `attach_window(hwnd, take_control=False)`
 - **Input** a window handle from `list_windows`.
@@ -144,7 +149,10 @@ asserted of the window actually visible, across repeated show/hide cycles.
   one from memory, clears any memory of what the caller has looked at, and
   discards any heap snapshots, which describe a process rather than a window.
   It also records the owning process id, which is what the heap tools read.
-  Rejects a handle that is not a window.
+  Rejects a handle that is not a window. Attaching to a window that **cannot be
+  driven** (below) succeeds and appends a warning naming the two integrity
+  levels — it is not refused, because reading such a window works normally and
+  refusing would remove something that works.
 - **Cost** Deferring the raise adds nothing, because every input path raised
   the window itself already — it was being paid twice. Measured: attach 6.0 ms
   deferred against 26.7 ms immediate; the first click afterwards costs 11.9 ms
@@ -281,6 +289,40 @@ only appears to.
   times, snapshot each round, and look for a type whose count rises by the same
   amount every round. A recognizable name — a page, a view model, a record
   class — appearing at all is worth more than any number in one pair.
+
+## Windows that cannot be driven
+
+Windows discards input sent from a process at a lower **integrity level** into
+a window at a higher one (UIPI). In practice: the server was started normally
+and the target was started with *Run as administrator*. The discard is
+**silent** — the send call reports that it accepted every event and sets no
+error; the events are dropped afterwards, on the way to the target's input
+queue. There is therefore no failure to detect after the fact, and a server
+that only checked the send call would report success for input that never
+arrived.
+
+| | |
+|---|---|
+| **Rule** | Before any input reaches the system, the server compares the target window's integrity level with its own. If the target is **higher**, the call **raises** and **nothing is sent**. This applies to every input tool without exception — click, click_element, type_text, press_key, hotkey, drag, scroll, hover, and every step inside `run_steps`. |
+| **The message** | Names both integrity levels and the target window, states that nothing was sent, and gives the two ways out: **restart the server elevated**, or pick another window. |
+| **Reading is unaffected** | `screenshot`, `capture_screen`, `capture_region`, `locate_in_region`, `snapshot`/`diff_since_snapshot` and `wait_stable` all work normally against such a window. Only *input* is blocked. |
+| **When the level cannot be read** | Treated as **drivable**, not as blocked. Refusing on a guess would make a working window permanently undriveable with no way to find out why, whereas the opposite error is one the caller still discovers. Measured never to occur (below). |
+| **`uiAccess`** | A server holding the `uiAccess` privilege is exempt from UIPI entirely, and then nothing is blocked. |
+| **Not affected by elevation direction** | If the *server* is the elevated one, every ordinary window is at or below it and nothing is refused. |
+
+**A second, different failure** is detected separately: if Windows refuses the
+send outright — the secure desktop is up because a **UAC prompt** is showing,
+or another process holds `BlockInput` — the call raises and says which of the
+two it is, and whether part of the action had already been sent. This is the
+case Windows *does* report, and it is not UIPI.
+
+**Measured, 2026-08-27, Windows 11 26200** — the check is a direct reading, not
+an inference from a permission denial: across **all 16 windowed processes** on
+the test machine (15 medium, one elevated `mmc.exe`) the target's integrity
+level was read successfully every time, and **nothing was unreadable**. Cost
+**~3 µs** per window. The elevated target was independently confirmed to be
+genuinely more privileged by a second, unrelated right (`PROCESS_VM_READ`
+denied for it, granted for peers).
 
 ## Driving the window
 
@@ -467,7 +509,11 @@ already knows works, instead of one per click.
 - **Output** a JSON summary — whether the whole script succeeded, how many of
   how many steps were performed, which step it stopped at (or null), a
   per-step record of action / result / duration, and the labels of the images
-  that follow — then those images, in the order listed.
+  that follow — then those images, in the order listed. **`performed` counts
+  steps *attempted*, including the one that failed** — a script stopped by its
+  first step reports `performed: 1`, not 0. Known wart: it disagrees with the
+  single-action refusal, which reports `performed: false` for the same event.
+  `ok` and `stopped_at_step` are the fields to trust.
 - **Rules — validated whole, then run** The entire script is checked before
   **any** step is performed: unknown action, missing argument, bad `button` or
   `expect`, more than 40 steps, or more than 60 s of total requested waiting
@@ -713,6 +759,32 @@ that it is the same handle the overlay reports. Both halves matter: the earlier
 version of this fix marked a handle that was never displayed, and the
 diagnostic covering it passed anyway, so the claim in this document was false
 for a day while everything looked green.
+
+The UIPI refusal is verified in three parts, none of which sends a single event
+into an elevated window — the refusal happens before anything is sent, so
+testing it by sending would be testing something else:
+
+- `tests\probe_integrity.py` measures what is knowable before deciding what to
+  do about it. It reports this process's level and then every windowed
+  process's, and counts how many could not be read at all — the number that
+  decides whether the check can be a **reading** or has to be a **guess from a
+  permission denial**. It came back 16 read, 0 unreadable, which is why an
+  unreadable level is treated as drivable rather than as elevated.
+- `tests\probe_uipi_refusal.py` asserts **both directions**, because a guard
+  that refuses too eagerly is the worse bug and produces no error message
+  saying so. Every window at or below our level must **not** be refused —
+  checked against all of them, not one example — and every window above it must
+  be refused through all six input entry points, with the foreground asserted
+  unchanged afterwards to prove nothing was taken over on the way out. It skips
+  the refusal half, loudly, when no elevated window happens to be open.
+- `tests\probe_typing_lands.py` covers the regression risk the fix introduced:
+  a check on the send call's return value sits on the path of **every**
+  keystroke, so turning working input into an exception would be worse than the
+  bug being fixed. It types into an EDIT control it creates itself and **reads
+  the text back out**, which is the question the server was criticised for never
+  asking — not that the call returned, not that a pixel changed, but that the
+  string arrived. It covers ASCII, Thai (the reason Unicode sending is used at
+  all), a backspace, and a Ctrl+A chord.
 
 `tests\diag_*.py` and `tests\spike_background*.py` are diagnostics, not tests:
 they print measurements and assert nothing. They exist because each overturned
