@@ -7,8 +7,12 @@ finished behaviour lives in [SPEC.md](SPEC.md).
 
 Idle. Nothing is running.
 
-Branch **`uipi-refusal`**, one commit ahead of `master`, no PR open. It closes
-[issue #6](https://github.com/PingPong2534/winauto-mcp/issues/6).
+Branch **`uipi-refusal`** is pushed and tracking `origin`, one commit ahead of
+`master`. **[PR #7](https://github.com/PingPong2534/winauto-mcp/pull/7) is open**
+and closes [issue #6](https://github.com/PingPong2534/winauto-mcp/issues/6),
+which has [a comment](https://github.com/PingPong2534/winauto-mcp/issues/6#issuecomment-5436843424)
+explaining the fix and correcting the issue's `ACCESS_DENIED` assumption.
+Nothing is merged — the PR is waiting on review.
 
 ## Just finished
 
