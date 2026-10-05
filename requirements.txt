@@ -1,6 +1,6 @@
-mcp[cli]>=1.2.0
+mcp[cli]>=2.0.0,<3
 pywin32
-uiautomation
+pywinauto>=0.6.9,<0.7
 mss
 Pillow
 psutil

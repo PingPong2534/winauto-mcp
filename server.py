@@ -1,5 +1,5 @@
 """MCP server that lets an LLM attach to a running Windows app, see it
-(screenshot + UI Automation element list), and drive it (click/type/keys).
+(screenshot + UI Automation element list), and control it via UIA patterns.
 
 Coordinate convention: every coordinate this server accepts or returns
 (click x/y, element rects, highlight rects) is relative to the attached
@@ -34,18 +34,18 @@ def _set_dpi_awareness():
 
 _set_dpi_awareness()
 
-import contextlib
 import functools
 import inspect
 import json
+import math
 import os
 import tempfile
+import threading
 import time
 
 from mcp.server.mcpserver import Image, MCPServer
 
 import heap
-import input_guard
 import input_sim
 import integrity
 import journal
@@ -56,97 +56,40 @@ from overlay import get_overlay
 from screenshot import changed_bbox, find_content_bbox, grab_window, to_png
 
 
-def _show_outline(hwnd) -> None:
-    """The green outline means "this window is being driven right now", not
-    "this window is bookmarked" -- so it appears when control is taken and is
-    removed by release_control()/detach_window(). Tracking only while driving
-    is also the only time its repainting is worth anything to anyone."""
-    if hwnd == _state["hwnd"]:
-        get_overlay().track(hwnd)
-
-
-window_manager.set_control_hook(_show_outline)
-
 mcp = MCPServer(
     name="winauto-mcp",
     instructions=(
-        "Attach to a running Windows window, inspect it, and drive it. "
-        "Typical flow: list_windows -> attach_window -> capture_screen "
-        "(read the returned text summary and/or image) -> click/type_text/press_key. "
-        "All coordinates are relative to the attached window's client area, "
-        "matching the pixel space of the image from capture_screen. "
-        "Do NOT eyeball click coordinates from a screenshot crop -- displayed "
-        "crops can be rescaled in ways that don't map back to real pixels. "
-        "Use locate_in_region(x1,y1,x2,y2) on a small candidate area instead "
-        "to get an exact center point. Use snapshot() before an action and "
-        "diff_since_snapshot() after it to objectively confirm the action had "
-        "a visible effect, instead of comparing two screenshots by eye. "
-        "For an app you expect to drive repeatedly across sessions, call "
-        "recall_location(label) first -- it re-verifies any cached spot "
-        "against the live screen before returning it, so a cache hit still "
-        "means 'confirmed right now', not 'trusted blindly'. On a miss, "
-        "locate it the normal way and call remember_location(label,...) so "
-        "next time is a hit.\n\n"
-        "ACT ON THE SCREEN IN FRONT OF YOU, NOT THE ONE YOU REMEMBER. A long "
-        "run drifts: you read a screenshot, do a few other things, then click "
-        "a coordinate the app has since moved on from. click() and drag() "
-        "check for exactly that and REFUSE rather than click blind -- you get "
-        "a report plus the window as it looks now, and re-issuing then works. "
-        "That refusal is information, not an obstacle: read the frame it hands "
-        "back before deciding what to do next, and reach for force=true only "
-        "when you know the area repaints on its own.\n"
-        "Nothing waits for you automatically. After an action that starts a "
-        "load, a render or an animation, call wait_stable() until the window "
-        "stops repainting rather than screenshotting a half-drawn frame and "
-        "reasoning about it. wait_stable() reports timing, not pixels, so take "
-        "a fresh screenshot afterwards.\n"
-        "Every call is journaled with before/after frames. When something is "
-        "inexplicable -- a click landed on nothing, a panel is not what you "
-        "expected -- use history() to see the steps that led here and "
-        "replay_frame(seq) to look at the screen as it actually was at that "
-        "step, instead of reconstructing it from memory. Those frames are "
-        "downscaled evidence: never take click coordinates off them.\n"
-        "Do not pay for the whole window when you only need part of it. To "
-        "re-check one thing -- did the dialog appear, did that field update -- "
-        "call capture_region(x1,y1,x2,y2) instead of screenshot(): a crop is a "
-        "fraction of the size to send and to read. Looking at a region counts "
-        "as having looked at THAT REGION, so a click inside it goes through "
-        "while one aimed somewhere you have not looked this run is still "
-        "refused; that is the point, not an obstacle.\n"
-        "Once you know an app, stop paying a round trip per click. run_steps() "
-        "performs a list of actions in order with a pause between them, and can "
-        "return small crops from the middle of the run. But only the FIRST step "
-        "is guarded against a stale coordinate -- the rest act on a screen the "
-        "script itself changed, which you have not seen. So script only what you "
-        "have watched the app do before, keep scripts short, and put "
-        "{\"do\":\"check\",\"region\":[...],\"expect\":\"changed\"} after any step the "
-        "rest depends on, so a wrong prediction stops the run instead of "
-        "carrying it into a state you did not plan for.\n"
-        "The mouse, keyboard and desktop belong to a person who is probably "
-        "still using them. attach_window() does NOT take the desktop -- it "
-        "only picks which window the other tools mean, and leaves it wherever "
-        "it was. Reading the window (screenshot, capture_region, wait_stable, "
-        "locate_in_region, diff_since_snapshot) works while it sits behind "
-        "other windows, so do not raise it just to look. The window comes to "
-        "the front, and the green outline appears, by itself the first time "
-        "you send input -- you never have to ask for that. When you finish a "
-        "piece of work and are about to think, report or wait, call "
-        "release_control() to hand the foreground back -- but not in the "
-        "middle of one interaction, since an open menu closes when its window "
-        "loses focus.\n"
-        "While an action runs, the person's keystrokes are held out so their "
-        "typing cannot land in the middle of yours; yours are signed and pass "
-        "through. If a result says they pressed a key anyway, or run_steps "
-        "stops with stopped_because, TAKE THAT AS A STOP SIGNAL: they are "
-        "reaching for a machine you are holding. Call release_keyboard() and "
-        "ask them what they want, rather than retrying. The same goes for "
-        "latched_off_by_user in keyboard_status(), which means they pressed "
-        "Escape three times to demand the keyboard back -- that is a person "
-        "with a problem, not a flag to work around. keyboard_status() reports "
-        "only whether and when a human key happened, never which keys; there "
-        "is no way to ask this server what anyone typed."
+        "Control an attached Windows app with pywinauto UIA patterns, without "
+        "moving the physical cursor, injecting keys, holding input, or raising "
+        "the target. Flow: list_windows -> attach_window -> get_elements or "
+        "capture_screen -> click_element / type_text / set_value -> read_element "
+        "to verify. Prefer a unique automation_id; ambiguous names are refused. "
+        "click(x,y) resolves an element inside the target's own UIA tree, even "
+        "when covered; it is not a physical click. Selecting an edit via click "
+        "only chooses the server's text target, without Windows focus. "
+        "type_text appends to the end by default, independently of the real "
+        "caret; replace=True replaces the entire value. Supply name or "
+        "automation_id for every field in a form. read_element reads values "
+        "and selection/toggle states; text and numeric writes verify readback. "
+        "UIA providers can have their own focus/popup behavior. Canvas-only "
+        "apps and unsupported patterns cannot be controlled in this backend. "
+        "hover, coordinate drag, right/double/modifier clicks and keyboard "
+        "shortcuts are refused. There is no real-input fallback, including "
+        "force=True. keep_cursor and stop_if_user_types are compatibility "
+        "arguments with no effect; no global input hooks are installed. "
+        "All coordinates are client-relative, matching screenshots. "
+        "For coordinates, take a fresh screenshot or locate_in_region and "
+        "respect stale-target refusals. A screenshot crop has an offset and "
+        "may be resized; do not eyeball its coordinates. run_steps validates "
+        "all actions first and journals each step. Only an initial coordinate "
+        "click before other mutations has a stale check, so keep scripts short and use check steps. "
+        "wait_stable is explicit; take a fresh screenshot afterwards. "
+        "history and replay_frame provide evidence; replay images are "
+        "downscaled and must not be used for aiming. Reading an elevated "
+        "window is allowed, but writes to higher-integrity targets are refused."
     ),
 )
+_tool_lock = threading.RLock()
 
 _state = {
     "hwnd": None,
@@ -264,54 +207,12 @@ def _seen_view_at(x: int, y: int):
 # Tools whose effect is visual and worth a before/after frame in the journal.
 # Everything else is journaled as text only: a window list or a UIA query
 # doesn't change the screen, so a frame pair would cost two captures and show
-# nothing. capture_screen/screenshot/hover are excluded for a different reason
+# nothing. capture_screen/screenshot are excluded for a different reason
 # -- they hand their own frame to journal_frame() rather than being captured
 # twice.
 _FRAME_TOOLS = frozenset(
-    {"click", "click_element", "drag", "scroll", "type_text", "press_key", "hotkey"}
+    {"click", "click_element", "scroll", "type_text", "set_value"}
 )
-
-# Tools that hold the person's keyboard while they run. The same set that
-# sends input, plus run_steps, which sends input through all of them at once,
-# and hover, whose whole result is ruined by a keystroke that dismisses the
-# tooltip it is waiting for. The lease is taken and released by the journaled
-# wrapper rather than inside each tool, so there is exactly one place that can
-# fail to give it back.
-#
-# hover additionally holds the *mouse*, which nothing else does. That lease is
-# taken inside hover() rather than here, because it must be released after the
-# picture is taken and before the pointer is put back -- a span narrower than
-# the tool call, and the only tool for which the pointer is the subject rather
-# than the instrument. See input_guard.holding_mouse.
-_HOLDING_TOOLS = _FRAME_TOOLS | {"run_steps", "hover"}
-
-# How long the keyboard is held for one action. Generous enough for a slow
-# click on a busy app, short enough that a crash between taking and releasing
-# costs the person a pause rather than a dead keyboard.
-_ACTION_LEASE = 5.0
-
-# A whole script holds the keyboard across all its steps, renewed as it goes,
-# so the person is not let in and out between every click.
-_SCRIPT_LEASE = 15.0
-
-# Tools that end by giving the person their window back. The same set that
-# takes the foreground in order to send input -- and run_steps, which is one
-# interaction from the person's point of view no matter how many steps it has,
-# so the hand-back happens once at the end rather than between every step.
-_RETURNS_FOCUS = _HOLDING_TOOLS
-
-# Whether that hand-back happens at all. Off is for an interaction that spans
-# several tool calls and dies if focus moves between them -- Blender's G/R/S
-# transform, a rubber-band selection continued in a later call, an app-drawn
-# dropdown that a_menu_is_open() cannot see.
-_focus_return = {"enabled": True}
-
-_INTERRUPTED_NOTE = (
-    " -- NOTE: the person pressed {n} key(s) while this ran, and they were held out."
-    " They are trying to use the machine. Stop, call release_keyboard(), and ask"
-    " before doing anything else."
-)
-
 
 # How far around a click target the screen is compared against the frame the
 # caller last looked at. Deliberately local: a spinner or clock elsewhere in
@@ -436,89 +337,42 @@ def _result_text(result) -> str:
 
 
 def journaled(fn):
-    """Record every call to a tool -- arguments, outcome, duration, and for
-    tools that drive the UI, a before/after thumbnail -- so that a later step
-    can ask what the screen actually looked like earlier instead of relying on
-    the model's recollection of it.
-
-    Failures are journaled too, then re-raised unchanged: the record of what
-    was attempted is most valuable exactly when it didn't work.
-    """
+    """Serialize shared session state and journal outcomes without taking input."""
     signature = inspect.signature(fn)
 
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
-        name = fn.__name__
-        wants_frames = name in _FRAME_TOOLS
-        _state["pre_frame"] = _try_grab() if wants_frames else None
-        _state["post_frame"] = None
-
-        try:
-            bound = signature.bind(*args, **kwargs)
-            logged_args = dict(bound.arguments)
-        except TypeError:
-            logged_args = {"args": repr(args), "kwargs": repr(kwargs)}
-
-        started = time.monotonic()
-        error = None
-        # The person's keys are held out for exactly as long as the action
-        # runs, and let back in even if it raises. _FRAME_TOOLS is the set that
-        # sends input, which is the same set for which interleaved typing would
-        # land in the middle of what we are doing.
-        holds_keyboard = name in _HOLDING_TOOLS
-        lease = _SCRIPT_LEASE if name == "run_steps" else _ACTION_LEASE
-        hold = (input_guard.holding(lease) if holds_keyboard
-                else contextlib.nullcontext(None))
-        try:
-            with hold as mark:
-                result = fn(*args, **kwargs)
-            interrupted = input_guard.interrupted_since(mark)
-        except Exception as exc:  # noqa: BLE001 - journaled, then re-raised as-is
-            error = exc
-            result = f"{type(exc).__name__}: {exc}"
-            interrupted = 0
-        elapsed_ms = round((time.monotonic() - started) * 1000)
-
-        if interrupted and isinstance(result, str):
-            result += _INTERRUPTED_NOTE.format(n=interrupted)
-
-        after = _state["post_frame"]
-        if after is None and wants_frames and error is None:
-            after = _try_grab()
-
-        # Hand the desktop back the moment the action is over, so the person
-        # can type into their own window without waiting for anyone to
-        # remember to release it. After the frame above, not before: the
-        # fallback path of a capture reads the screen, and by then the screen
-        # would be showing their window instead of ours.
-        #
-        # Outside the try/except that wraps the action itself, because an
-        # action that raised took the foreground just the same -- and a failure
-        # is exactly when nobody is coming back to tidy up.
-        if name in _RETURNS_FOCUS and _focus_return["enabled"]:
+        with _tool_lock:
+            name = fn.__name__
+            wants_frames = name in _FRAME_TOOLS
+            _state["pre_frame"] = _try_grab() if wants_frames else None
+            _state["post_frame"] = None
             try:
-                window_manager.hand_back_foreground()
-            except Exception:  # noqa: BLE001 - never turn a courtesy into a failure
-                pass
-
-        hwnd = _state["hwnd"]
-        journal.record(
-            name,
-            args=logged_args,
-            ok=error is None,
-            result=_result_text(result) if error is None else result,
-            ms=elapsed_ms,
-            window=window_manager.get_window_title(hwnd) if hwnd else None,
-            before=_state["pre_frame"],
-            after=after,
-        )
-        _state["pre_frame"] = None
-        _state["post_frame"] = None
-
-        if error is not None:
-            raise error
-        return result
-
+                logged_args = dict(signature.bind(*args, **kwargs).arguments)
+            except TypeError:
+                logged_args = {"args": repr(args), "kwargs": repr(kwargs)}
+            started = time.monotonic()
+            error = None
+            try:
+                result = fn(*args, **kwargs)
+            except Exception as exc:
+                error = exc
+                result = f"{type(exc).__name__}: {exc}"
+            after = _state["post_frame"]
+            if after is None and wants_frames and error is None:
+                after = _try_grab()
+            hwnd = _state["hwnd"]
+            journal.record(
+                name, args=logged_args, ok=error is None,
+                result=_result_text(result), ms=round((time.monotonic() - started) * 1000),
+                window=window_manager.get_window_title(hwnd) if hwnd and window_manager.window_exists(hwnd) else None,
+                before=_state["pre_frame"], after=after,
+            )
+            _state["pre_frame"] = None
+            _state["post_frame"] = None
+            if error is not None:
+                raise error
+            return result
     return wrapper
 
 
@@ -534,10 +388,9 @@ def list_windows() -> str:
     A window carrying "input_blocked": true runs at a higher Windows integrity
     level than this server -- typically it was started with "Run as
     administrator" and the server was not. You can still read such a window
-    (screenshot, capture_region, locate_in_region all work), but every click
-    and keystroke sent to it is discarded by Windows without an error, so the
-    input tools refuse it outright rather than report a success that did not
-    happen. Prefer another window, or restart the server elevated."""
+    where supported by the app's provider. Mutations across that boundary
+    are refused before any UIA action. Prefer another window, or run the
+    server at the same integrity level as the target."""
     windows = window_manager.list_windows()
     return json.dumps(
         [
@@ -551,62 +404,31 @@ def list_windows() -> str:
 
 @tool
 def attach_window(hwnd: int, take_control: bool = False) -> str:
-    """Attach to a window by hwnd (from list_windows). This only chooses which
-    window the other tools act on -- it does NOT take the desktop over. The
-    window is left exactly where it was, in front or behind, and no outline is
-    drawn, so attaching costs the person at the keyboard nothing.
-
-    You can already read the window from here: screenshot, capture_region,
-    get_elements, wait_stable and locate_in_region all work while it is
-    covered. The window is raised and the green outline appears by itself the
-    first time you actually send input, because that is the first moment input
-    requires it -- and it goes away again on release_control().
-
-    Pass take_control=true only if you want it raised immediately, e.g. so a
-    person can watch which window is about to be driven."""
+    """Choose a window for background UIA inspection/control. Never raise it.
+    take_control=True is unsupported; use highlight for a visual indication."""
     if not window_manager.window_exists(hwnd):
         raise ValueError(f"no such window: {hwnd}")
-    _state["hwnd"] = hwnd
-    _state["pid"] = window_manager.get_pid(hwnd)
-    _state["seen"] = []
-    # Heap snapshots describe one process. Keeping them across an attach would
-    # let heap_diff compare two different programs and report the difference
-    # between them as growth.
-    _state["heap"] = {}
-    # Said at attach because that is the earliest moment it is knowable, and
-    # the caller is about to plan a run around a window that cannot be driven.
-    # It is a warning and not a refusal: reading an elevated window works
-    # perfectly well, so refusing the attach would take away something that
-    # does work. The refusal happens at the first input call, which is the
-    # first moment anything would actually be a lie.
-    level = integrity.window_level(hwnd)
-    blocked = integrity.blocks_input(level)
-
     if take_control:
-        window_manager.bring_to_foreground(hwnd)  # the hook draws the outline
+        input_sim.unsupported("attach_window(take_control=True)")
+    input_sim.reset_target()
+    _state.update(hwnd=hwnd, pid=window_manager.get_pid(hwnd),
+                  seen=[], heap={}, last_snapshot=None)
     title = window_manager.get_window_title(hwnd)
-    # Attaching is the start of an automation run, so it starts a fresh
-    # journal -- history() should describe this run, not trail off into the
-    # previous app's steps.
     session = journal.start_session(f"{title} (hwnd={hwnd})")
-    how = "in front, outline showing" if take_control else "left as it was; reading works from behind"
-    warning = (
-        f"\n\nWARNING -- THIS WINDOW CANNOT BE DRIVEN FROM HERE. "
-        f"{integrity.why_blocked(level, title, window_manager.get_process_name(hwnd))} "
-        "Do not plan a run of clicks and keystrokes against it; they will be refused."
-        if blocked else ""
-    )
-    return f'attached to "{title}" (hwnd={hwnd}) -- {how}; journal session {session}{warning}'
+    level = integrity.window_level(hwnd)
+    warning = ""
+    if integrity.blocks_input(level):
+        warning = "\nWARNING: " + integrity.why_blocked(level, title, window_manager.get_process_name(hwnd))
+    return (f'attached to "{title}" (hwnd={hwnd}) -- pywinauto UIA; '
+            f'mouse and foreground unchanged; journal session {session}{warning}')
 
 
 @tool
 def detach_window() -> str:
-    """Detach from the current window and hide the tracking overlay."""
-    _state["hwnd"] = None
+    """Detach, clear the logical text target and hide any requested overlay."""
+    input_sim.reset_target()
+    _state.update(hwnd=None, pid=None, seen=[], heap={}, last_snapshot=None)
     get_overlay().untrack()
-    # Nothing is being driven any more, so nothing has a claim on the person's
-    # keyboard. Releasing here means walking away mid-run cannot leave it held.
-    input_guard.guard().release("detached")
     return "detached"
 
 
@@ -615,7 +437,7 @@ def capture_screen():
     """Screenshot the attached window's client area, plus a text summary of
     interactive elements found via UI Automation (buttons, inputs, menus, ...).
     If the app renders to a canvas (e.g. a game) the UIA summary will be empty
-    -- read the image directly and pass pixel coordinates to click()."""
+    -- inspection still works, but canvas-only controls cannot be activated."""
     hwnd = _require_attached()
     frame = grab_window(hwnd)
     _mark_seen(frame)
@@ -692,10 +514,24 @@ def capture_region(x1: int, y1: int, x2: int, y2: int):
 @tool
 def get_elements() -> str:
     """UI Automation element list for the attached window only (no screenshot),
-    as JSON: [{name, control_type, category, enabled, rect: [x1,y1,x2,y2]}, ...].
+    as JSON with name, automation_id, control_type, enabled, actions and rect.
     rect is client-relative, same space as capture_screen's image."""
     hwnd = _require_attached()
     return json.dumps(uia_inspect.get_elements(hwnd), ensure_ascii=False)
+
+
+@tool
+def read_element(name: str | None = None, automation_id: str | None = None) -> str:
+    """Read a uniquely identified UIA element's value and selection/toggle state."""
+    return json.dumps(input_sim.read_element(_require_attached(), name, automation_id),
+                      ensure_ascii=False)
+
+
+@tool
+def set_value(value: float, name: str | None = None,
+              automation_id: str | None = None) -> str:
+    """Set a UIA numeric control via RangeValuePattern and verify readback."""
+    return json.dumps(input_sim.set_value(_require_attached(), value, name, automation_id))
 
 
 @tool
@@ -708,22 +544,11 @@ def click(
     force: bool = False,
     keep_cursor: bool = False,
 ):
-    """Click at (x, y) relative to the attached window's client area (same
-    space as the capture_screen image). button is 'left' or 'right'.
-    `modifiers` (e.g. ["ctrl"] or ["shift"]) are held down for the click --
-    use for ctrl/shift-click multi-selection in a tree or list.
-
-    Refuses to click blind: if the area around (x, y) no longer matches the
-    frame you took the coordinate from -- the app finished loading, a dialog
-    opened, the list scrolled -- nothing is clicked. You get back a report
-    saying so plus the window as it looks now, and the click is yours to
-    re-issue once you have looked. `force=true` skips that check, for a
-    target sitting in an area the app repaints on its own.
-
-    The pointer is returned to where the person left it afterwards, since it
-    is their pointer too. Pass keep_cursor=true to leave it on the target
-    instead -- needed when the next step keeps following the pointer, such as
-    a Blender modal transform started with G/R/S, or a hover-driven menu.
+    """Resolve client coordinates in the attached UIA tree and activate the element.
+    No physical click is sent. Right/double/modifier clicks are refused.
+    Stale screenshots are guarded unless force=True. force only skips the
+    stale guard; keep_cursor is ignored and cannot enable real input.
+    Selecting an edit only chooses the logical text target, not Windows focus.
     """
     hwnd = _require_attached()
     if button not in ("left", "right"):
@@ -732,186 +557,28 @@ def click(
         blocked = _stale_block(x, y, f"click({x}, {y})")
         if blocked is not None:
             return blocked
-    input_sim.click_in_window(hwnd, x, y, button=button, double=double, modifiers=modifiers,
+    action = input_sim.click_in_window(hwnd, x, y, button=button, double=double, modifiers=modifiers,
                               keep_cursor=keep_cursor)
     mod_note = f" modifiers={modifiers}" if modifiers else ""
-    return f"clicked ({x}, {y}) button={button} double={double}{mod_note}"
+    return f"{action} at ({x}, {y}) via pywinauto UIA{mod_note}"
 
 
 @tool
-def click_element(name: str, button: str = "left", double: bool = False) -> str:
-    """Click a UIA element by its visible name/label (e.g. a button or menu
-    item's text) instead of pixel coordinates -- matches exactly first, falls
-    back to a substring match. Fails if no element matches; use get_elements
-    or capture_screen first to see available names."""
-    hwnd = _require_attached()
-    if button not in ("left", "right"):
-        raise ValueError("button must be 'left' or 'right'")
-    el, count = _find_element(hwnd, name)
-    if el is None:
-        raise ValueError(f'no element found matching name "{name}" -- check get_elements for exact names')
-    x1, y1, x2, y2 = el["rect"]
-    cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
-    input_sim.click_in_window(hwnd, cx, cy, button=button, double=double)
-    note = f" (ambiguous: {count} elements matched, clicked the first)" if count > 1 else ""
-    return f'clicked element "{el["name"]}" at ({cx}, {cy}){note}'
-
-
-def _popup_text(hwnd) -> str | None:
-    """The visible text of a popup window, read rather than photographed.
-
-    Measured 2026-08-26 (tests/probe_hover.py): a Win32 tooltip's UIA Name is
-    exactly the string the app set. A caller can assert on that; it cannot
-    assert on a picture of pale grey text.
-    """
-    try:
-        import uiautomation as auto
-
-        control = auto.ControlFromHandle(hwnd)
-        return control.Name or None
-    except Exception:  # noqa: BLE001 - a popup with no UIA is still worth reporting
-        return None
-
-
-# How long the pointer sits on the target before the picture is taken. Windows'
-# own SPI_GETMOUSEHOVERTIME is 500ms, which is what a tooltip waits for, so
-# anything shorter photographs the moment before it appears.
-HOVER_DWELL_MS = 700
-
-# The pointer is held for the dwell plus enough to aim, photograph and put it
-# back. Capped hard by input_guard.MAX_MOUSE_LEASE_SECONDS regardless.
-_HOVER_LEASE_MARGIN = 1.2
+def click_element(name: str | None = None, button: str = "left",
+                  double: bool = False, automation_id: str | None = None) -> str:
+    """Activate one UIA element by unique name or automation_id.
+    Names match exactly first, then by substring; ambiguity is refused.
+    An edit becomes the logical text target without changing Windows focus.
+    Right/double clicks are unsupported."""
+    result = input_sim.click_element(_require_attached(), name, automation_id, button, double)
+    return json.dumps(result, ensure_ascii=False)
 
 
 @tool
-def hover(x: int, y: int, dwell_ms: int = HOVER_DWELL_MS, force: bool = False):
-    """Rest the pointer on (x, y) in the attached window's client area, wait
-    for the app to react, and return what appeared -- a tooltip, a hover
-    highlight, a menu that opens on hover.
-
-    This is the one tool that holds the mouse. For the length of the dwell the
-    pointer is pinned where it was put and the person's mouse is held out,
-    because a hand on the mouse during that half-second moves the pointer off
-    the target and the picture is of nothing. The hold ends when the tool
-    returns, and expires on its own regardless. The pointer is then put back
-    exactly where the person left it and their window is handed back, so a
-    hover costs them a stutter rather than an interruption.
-
-    It refuses to take the mouse at all if a button is physically down -- that
-    is a drag in progress and interrupting it would strand it -- and after the
-    escape chord has been used. In both cases the hover still happens, and the
-    result says the pointer was not held so you can judge the picture
-    accordingly.
-
-    Returns a report plus an image. The image is a screen grab, not the usual
-    window render: measured, PrintWindow does NOT contain tooltips, because a
-    tooltip is its own top-level window and PrintWindow renders one window.
-    So the attached window must be in front and unobscured for this to show
-    anything -- which it is, since hovering brings it forward.
-
-    The report names every window that appeared during the dwell, with its
-    class, its position in client coordinates and its text read via UIA. Read
-    the text rather than the image where you can: a popup that opened outside
-    the window's client area is described there but cannot be in the picture.
-
-    Looking at a hover image does not count as having looked at the window --
-    what it shows is gone by the time anything could be clicked. To click
-    something you found this way, screenshot() first and aim from that.
-    """
-    hwnd = _require_attached()
-    dwell = max(0, min(int(dwell_ms), 5000)) / 1000.0
-    if not force:
-        blocked = _stale_block(x, y, f"hover({x}, {y})")
-        if blocked is not None:
-            return blocked
-
-    import win32api
-    import win32gui
-
-    input_sim.bring_to_foreground(hwnd)
-    time.sleep(0.05)
-    screen_x, screen_y = win32gui.ClientToScreen(hwnd, (int(x), int(y)))
-    origin = win32api.GetCursorPos()
-    before = window_manager.visible_top_levels()
-
-    lease = dwell + _HOVER_LEASE_MARGIN
-    with input_guard.holding_mouse(lease) as hold:
-        # Two moves, not one: a tooltip is armed by movement *into* the tool,
-        # and a single jump can leave the app with nothing to notice.
-        input_sim.move_to(screen_x - 24, screen_y - 24)
-        time.sleep(0.05)
-        input_sim.move_to(screen_x, screen_y)
-        time.sleep(dwell)
-
-        frame = grab_window(hwnd, allow_occluded=False)
-        # The outline is ours and it is shown when a window starts being driven,
-        # so on a first hover it appears *during* the dwell and would be
-        # reported as something the app popped up. Its handle does not exist
-        # until it has been shown once, which is why this is read here and not
-        # before the dwell -- read too early it is None and excludes nothing.
-        after = window_manager.visible_top_levels([h for h in (get_overlay().hwnd,) if h])
-        appeared = [(h, cls, rect) for h, (cls, rect) in after.items() if h not in before]
-
-        # Back inside the hold, so the person's swallowed movements cannot
-        # fight the restore and leave the pointer somewhere neither of us put it.
-        input_sim.move_to(*origin)
-        moved_by_person = input_guard.mouse_interrupted_since(hold.mark)
-
-    cl, ct, _, _ = window_manager.get_client_rect_screen(hwnd)
-    popups = []
-    for popup_hwnd, cls, (pl, pt, pr, pb) in appeared:
-        client_rect = [pl - cl, pt - ct, pr - cl, pb - ct]
-        popups.append({
-            "class": cls,
-            "rect": client_rect,
-            "text": _popup_text(popup_hwnd),
-            "in_the_image": (
-                client_rect[0] >= 0 and client_rect[1] >= 0
-                and client_rect[2] <= frame.width and client_rect[3] <= frame.height
-            ),
-        })
-
-    report = {
-        "hovered": [x, y],
-        "dwell_ms": round(dwell * 1000),
-        "pointer_held": hold.locked,
-        "appeared": popups,
-    }
-    if not hold.locked:
-        report["pointer_not_held_because"] = hold.reason
-        report["note"] = (
-            "the pointer was not pinned, so anything touching the mouse during the dwell "
-            "could have moved it off the target -- check the image shows what you expected"
-        )
-    if moved_by_person:
-        report["person_moved_the_mouse"] = moved_by_person
-    if not popups:
-        report["note_no_popups"] = (
-            "nothing new appeared. The app may draw its hover state inside its own window "
-            "(a highlight, not a popup), which the image will show; or it may need a "
-            "longer dwell_ms; or there is nothing to hover at these coordinates."
-        )
-
-    # Deliberately does NOT mark anything as seen, so a coordinate read off a
-    # hover image is refused once and you are shown the settled window first.
-    # Two reasons, and either alone is enough:
-    #
-    # The picture shows a transient. The tooltip in it is gone by the time
-    # anything could be clicked, so it is not a sound basis for aiming.
-    #
-    # And the capture paths do not agree. Measured 2026-08-26 across the probe's
-    # two frames of the same window: outside the tooltip, PrintWindow and a
-    # screen grab differ on 0.87% of pixels, worst channel delta 245, spread
-    # across the lower half rather than confined to the borders -- unexplained.
-    # Marking a screen grab as seen and then comparing it against a PrintWindow
-    # frame would refuse clicks over a difference in how the picture was taken.
-    # The journal gets the settled frame regardless; that is bookkeeping, not
-    # something the caller aimed from.
-    settled = _try_grab()
-    if settled is not None:
-        journal_frame(settled)
-
-    return [json.dumps(report, ensure_ascii=False), Image(data=to_png(frame), format="png")]
+def hover(x: int, y: int, dwell_ms: int = 700, force: bool = False):
+    """Unsupported: a real hover needs the shared cursor. No input is sent."""
+    _require_attached()
+    input_sim.unsupported("hover")
 
 
 @tool
@@ -943,7 +610,7 @@ def wait_stable(
     """Wait until the attached window stops changing -- i.e. until it has
     finished drawing whatever it was drawing.
 
-    Actions here return as soon as the input has been sent, which is well
+    Actions here can return before the app finishes redrawing, which is well
     before a menu has opened, a dialog has appeared or a document has
     rendered. Call this after an action that triggers a slow redraw, then
     take a fresh screenshot before deciding where to click next. Unlike
@@ -1021,59 +688,37 @@ def _settle(hwnd, timeout=5.0, settle_ms=400, interval=0.12, threshold=10, regio
 
 
 @tool
-def type_text(text: str) -> str:
-    """Type literal Unicode text (any language) into whatever control currently
-    has focus in the attached window. Click into the target field first."""
-    hwnd = _require_attached()
-    input_sim.type_text(text, hwnd=hwnd)
-    return f"typed {len(text)} characters"
+def type_text(text: str, name: str | None = None,
+              automation_id: str | None = None, replace: bool = False) -> str:
+    """Write literal Unicode through ValuePattern, with verified readback.
+    Appends to the END by default (not the physical caret); replace=True sets
+    the whole value. Target by name/id, a logically selected edit, or the
+    only editable control. No global keyboard or focus is used."""
+    result = input_sim.type_text(text, hwnd=_require_attached(), name=name,
+                                 automation_id=automation_id, replace=replace)
+    return json.dumps(result, ensure_ascii=False)
 
 
 @tool
 def press_key(key: str) -> str:
-    """Press a special key: enter, tab, escape, backspace, delete, up, down,
-    left, right, home, end, pageup, pagedown, space, ctrl, alt, shift, f1-f12."""
-    hwnd = _require_attached()
-    input_sim.press_key(key, hwnd=hwnd)
-    return f"pressed {key}"
+    """Unsupported in background UIA. Activate a named button instead."""
+    input_sim.press_key(key, hwnd=_require_attached())
 
 
 @tool
-def drag(x1: int, y1: int, x2: int, y2: int, button: str = "left", force: bool = False,
-         keep_cursor: bool = False):
-    """Drag from (x1, y1) to (x2, y2), both relative to the attached window's
-    client area. Presses the button down, moves through intermediate points
-    (not a teleport -- many apps only recognize a drag if the mouse visibly
-    moves while held), then releases. Use for reordering, drag-into-viewport,
-    or dragging a file from a browser/dock onto a node.
-
-    Like click(), this refuses to start a drag from a spot that has changed
-    since you last looked at the screen -- grabbing the wrong thing is worse
-    than clicking the wrong thing, since it also drops it somewhere. See
-    click() for what comes back and how `force` behaves."""
-    hwnd = _require_attached()
-    if button not in ("left", "right"):
-        raise ValueError("button must be 'left' or 'right'")
-    if not force:
-        blocked = _stale_block(x1, y1, f"drag({x1}, {y1}) -> ({x2}, {y2})")
-        if blocked is not None:
-            return blocked
-    input_sim.drag_in_window(hwnd, x1, y1, x2, y2, button=button, keep_cursor=keep_cursor)
-    return f"dragged ({x1}, {y1}) -> ({x2}, {y2}) button={button}"
+def drag(x1: int, y1: int, x2: int, y2: int, button: str = "left",
+         force: bool = False, keep_cursor: bool = False):
+    """Unsupported coordinate gesture; use set_value for a UIA slider."""
+    input_sim.drag_in_window(_require_attached(), x1, y1, x2, y2, button=button)
 
 
 @tool
 def scroll(x: int, y: int, clicks: int, keep_cursor: bool = False) -> str:
-    """Scroll the mouse wheel at (x, y) relative to the attached window's
-    client area. Positive clicks scrolls up, negative scrolls down (one
-    click = one wheel notch). Use this to reach content below the fold in
-    scrollable panels (e.g. a long Inspector property list).
-
-    See click() for keep_cursor -- the pointer goes back to the person's
-    position afterwards unless you ask for it to stay."""
-    hwnd = _require_attached()
-    input_sim.scroll_in_window(hwnd, x, y, clicks, keep_cursor=keep_cursor)
-    return f"scrolled {clicks} click(s) at ({x}, {y})"
+    """Scroll the target element/ancestor via UIA ScrollPattern.
+    Positive clicks scroll up, negative down; each is one small provider-defined
+    UIA scroll step. keep_cursor is ignored because no pointer is moved."""
+    result = input_sim.scroll_in_window(_require_attached(), x, y, clicks)
+    return f"{result}: {clicks} step(s) at ({x}, {y})"
 
 
 MAX_SCRIPT_STEPS = 40
@@ -1087,7 +732,8 @@ _STEP_KINDS = {
     "type": ("text",),
     "key": ("key",),
     "hotkey": ("keys",),
-    "click_element": ("name",),
+    "click_element": (),
+    "set_value": ("value",),
     "wait": ("ms",),
     "wait_stable": (),
     "capture": (),
@@ -1116,6 +762,22 @@ def _validate_steps(steps):
             raise ValueError(
                 f"step {i}: unknown action {kind!r} -- must be one of {sorted(_STEP_KINDS)}"
             )
+        if kind in ("drag", "key", "hotkey"):
+            input_sim.unsupported(f"step {i}: {kind}")
+        if kind in ("click", "click_element"):
+            input_sim._click_options(step.get("button", "left"), bool(step.get("double", False)),
+                                     step.get("modifiers"))
+        if kind in ("click_element", "set_value") and not (step.get("name") or step.get("automation_id")):
+            raise ValueError(f"step {i}: provide name or automation_id")
+        if kind == "type" and step.get("text") is not None and not isinstance(step["text"], str):
+            raise ValueError(f"step {i}: text must be a string")
+        if "replace" in step and not isinstance(step["replace"], bool):
+            raise ValueError(f"step {i}: replace must be a boolean")
+        for selector in ("name", "automation_id"):
+            if step.get(selector) is not None and (
+                not isinstance(step[selector], str) or not step[selector].strip()
+            ):
+                raise ValueError(f"step {i}: {selector} must be a non-empty string")
         missing = [k for k in _STEP_KINDS[kind] if step.get(k) is None]
         if missing:
             raise ValueError(f"step {i} ({kind}) is missing {missing}")
@@ -1123,10 +785,31 @@ def _validate_steps(steps):
             raise ValueError(f"step {i}: button must be 'left' or 'right'")
         if kind == "check" and step.get("expect", "changed") not in ("changed", "unchanged"):
             raise ValueError(f"step {i}: expect must be 'changed' or 'unchanged'")
+        for field in ("x", "y", "clicks", "ms", "settle_ms", "threshold"):
+            if field in step and (isinstance(step[field], bool) or not isinstance(step[field], int)):
+                raise ValueError(f"step {i}: {field} must be an integer")
+        if kind == "scroll" and not -100 <= step["clicks"] <= 100:
+            raise ValueError(f"step {i}: clicks must be between -100 and 100")
+        if "region" in step and step["region"] is not None:
+            region = step["region"]
+            if (not isinstance(region, list) or len(region) != 4
+                    or any(isinstance(n, bool) or not isinstance(n, int) for n in region)
+                    or region[2] <= region[0] or region[3] <= region[1]):
+                raise ValueError(f"step {i}: region must be [x1,y1,x2,y2] with positive area")
+        if kind == "set_value":
+            value = step["value"]
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+                raise ValueError(f"step {i}: value must be a finite number")
         if kind == "wait":
+            if step["ms"] < 0:
+                raise ValueError(f"step {i}: ms must be >= 0")
             waited += int(step["ms"])
         if kind == "wait_stable":
-            waited += int(float(step.get("timeout", 5.0)) * 1000)
+            timeout = step.get("timeout", 5.0)
+            if (isinstance(timeout, bool) or not isinstance(timeout, (int, float))
+                    or not math.isfinite(timeout) or timeout <= 0):
+                raise ValueError(f"step {i}: timeout must be a finite number > 0")
+            waited += int(timeout * 1000)
     if waited > MAX_SCRIPT_WAIT_MS:
         raise ValueError(
             f"the script asks to wait {waited}ms in total, over the {MAX_SCRIPT_WAIT_MS}ms limit "
@@ -1146,55 +829,14 @@ def _clamp_region(frame, region):
 
 @tool
 def run_steps(steps: list[dict], delay_ms: int = 120, stop_on_error: bool = True,
-              stop_if_user_types: bool = True):
-    """Run several actions in one call, in order, with a pause between them --
-    instead of one tool call per click. Use it once you know an app well enough
-    to predict what the next few steps are: opening a menu and picking an item,
-    filling three fields and pressing Enter, a keyboard chord followed by a
-    dialog. Each step is journaled with its own before/after frame, so a script
-    that goes wrong is still reconstructable with history()/replay_frame().
-
-    `steps` is a list of objects, each with "do" plus that action's arguments:
-      {"do":"click","x":100,"y":200,"button":"left","double":false,"modifiers":["ctrl"],"keep_cursor":false}
-      {"do":"drag","x1":..,"y1":..,"x2":..,"y2":..,"button":"left"}
-      {"do":"scroll","x":..,"y":..,"clicks":-3}
-      {"do":"type","text":"hello"}
-      {"do":"key","key":"enter"}
-      {"do":"hotkey","keys":["ctrl","s"]}
-      {"do":"click_element","name":"Save"}
-      {"do":"wait","ms":500}
-      {"do":"wait_stable","timeout":5.0,"settle_ms":400,"region":[x1,y1,x2,y2]}
-      {"do":"capture","region":[x1,y1,x2,y2]}   -- region optional; omit for the whole window
-      {"do":"check","region":[x1,y1,x2,y2],"expect":"changed"}   -- "changed" or "unchanged"
-
-    A "capture" step returns an image, so you can watch a couple of points in
-    the script without stopping it. Keep those to small regions -- that is the
-    entire saving over doing it step by step.
-
-    A "check" step is how a script fails early instead of carrying on into a
-    state you did not plan for: it compares the region against how it looked at
-    the previous checkpoint (script start, or the last capture/check) and stops
-    the script if the expectation does not hold. Put one after any step whose
-    success the rest of the script depends on -- a menu that must have opened,
-    a dialog that must have closed.
-
-    THE STALENESS CHECK ONLY GUARDS THE FIRST STEP. It cannot guard the rest:
-    step 2 acts on a screen that step 1 deliberately changed, and there is no
-    frame you have seen of it. So the coordinates in steps 2..n are your
-    prediction of what the app will do, which is exactly the assumption this
-    server otherwise refuses to make on your behalf. Script only what you have
-    seen the app do before, keep scripts short, and use "check" steps to make
-    a wrong prediction stop the run rather than continue it.
-
-    The person's keyboard is held out for the whole script rather than per
-    step, so their typing cannot land between two of its clicks. If they press
-    a key anyway the script stops there, because someone reaching for the
-    keyboard mid-run wants the machine more than the script does; set
-    stop_if_user_types=false only for a script that must not be interrupted.
-
-    Stops at the first failing step unless stop_on_error=false, and returns a
-    per-step report plus, if it stopped early, the window as it looks now.
-    `delay_ms` pauses between steps so the app can react.
+              stop_if_user_types: bool = False):
+    """Run up to 40 UIA actions, validating all steps before any action.
+    Kinds: click, click_element, type, set_value, scroll, wait, wait_stable,
+    capture, check. type and click_element accept name/automation_id; type
+    accepts replace. Unsupported gestures/key steps reject the whole script.
+    An initial coordinate click before other mutations is stale-guarded. Each executed step is
+    journaled. stop_on_error=False continues runtime failures.
+    stop_if_user_types is ignored: the background backend never watches keys.
     """
     hwnd = _require_attached()
     _validate_steps(steps)
@@ -1205,12 +847,6 @@ def run_steps(steps: list[dict], delay_ms: int = 120, stop_on_error: bool = True
     mark = frame  # reference for "check" steps: script start, then each checkpoint
     guard_armed = True
     stopped_at = None
-    # The lease itself is taken by the journaled wrapper, which owns releasing
-    # it however this returns. Here we only watch for the person reaching for
-    # the keyboard, and keep the lease alive while a long script runs.
-    keys_at_start = input_guard.guard().human_events
-    interrupted = 0
-
     for i, step in enumerate(steps, 1):
         kind = step["do"]
         entry = {"step": i, "do": kind, "ok": True}
@@ -1230,7 +866,7 @@ def run_steps(steps: list[dict], delay_ms: int = 120, stop_on_error: bool = True
                         images.append(("blocked at step 1", blocked[1]))
                         stopped_at = i
                         break
-                input_sim.click_in_window(
+                action = input_sim.click_in_window(
                     hwnd, x, y,
                     button=step.get("button", "left"),
                     double=bool(step.get("double", False)),
@@ -1238,26 +874,7 @@ def run_steps(steps: list[dict], delay_ms: int = 120, stop_on_error: bool = True
                     keep_cursor=bool(step.get("keep_cursor", False)),
                 )
                 guard_armed = False
-                entry["result"] = f"clicked ({x}, {y})"
-            elif kind == "drag":
-                x1, y1, x2, y2 = (int(step[k]) for k in ("x1", "y1", "x2", "y2"))
-                if guard_armed and not step.get("force"):
-                    _state["pre_frame"] = frame
-                    blocked = _stale_block(x1, y1, f"drag({x1}, {y1}) -> ({x2}, {y2})")
-                    _state["pre_frame"] = None
-                    if blocked is not None:
-                        entry.update(ok=False, result=json.loads(blocked[0])["reason"])
-                        report.append(entry)
-                        images.append(("blocked at step 1", blocked[1]))
-                        stopped_at = i
-                        break
-                input_sim.drag_in_window(
-                    hwnd, x1, y1, x2, y2,
-                    button=step.get("button", "left"),
-                    keep_cursor=bool(step.get("keep_cursor", False)),
-                )
-                guard_armed = False
-                entry["result"] = f"dragged ({x1}, {y1}) -> ({x2}, {y2})"
+                entry["result"] = f"{action} at ({x}, {y})"
             elif kind == "scroll":
                 x, y, clicks = int(step["x"]), int(step["y"]), int(step["clicks"])
                 input_sim.scroll_in_window(
@@ -1266,30 +883,21 @@ def run_steps(steps: list[dict], delay_ms: int = 120, stop_on_error: bool = True
                 guard_armed = False
                 entry["result"] = f"scrolled {clicks} at ({x}, {y})"
             elif kind == "type":
-                input_sim.type_text(str(step["text"]), hwnd=hwnd)
+                entry["result"] = input_sim.type_text(str(step["text"]), hwnd=hwnd,
+                                    name=step.get("name"), automation_id=step.get("automation_id"),
+                                    replace=bool(step.get("replace", False)))
                 guard_armed = False
-                entry["result"] = f"typed {len(str(step['text']))} characters"
-            elif kind == "key":
-                input_sim.press_key(str(step["key"]), hwnd=hwnd)
-                guard_armed = False
-                entry["result"] = f"pressed {step['key']}"
-            elif kind == "hotkey":
-                input_sim.press_keys(list(step["keys"]), hwnd=hwnd)
-                guard_armed = False
-                entry["result"] = f"pressed chord {'+'.join(step['keys'])}"
             elif kind == "click_element":
-                el, count = _find_element(hwnd, str(step["name"]))
-                if el is None:
-                    raise ValueError(f'no element matching "{step["name"]}"')
-                ex1, ey1, ex2, ey2 = el["rect"]
-                cx, cy = (ex1 + ex2) // 2, (ey1 + ey2) // 2
-                input_sim.click_in_window(
-                    hwnd, cx, cy,
-                    button=step.get("button", "left"),
-                    double=bool(step.get("double", False)),
+                entry["result"] = input_sim.click_element(
+                    hwnd, name=step.get("name"), automation_id=step.get("automation_id"),
+                    button=step.get("button", "left"), double=bool(step.get("double", False)),
                 )
                 guard_armed = False
-                entry["result"] = f'clicked element "{el["name"]}" at ({cx}, {cy})'
+            elif kind == "set_value":
+                entry["result"] = input_sim.set_value(
+                    hwnd, step["value"], name=step.get("name"), automation_id=step.get("automation_id")
+                )
+                guard_armed = False
             elif kind == "wait":
                 time.sleep(max(0, min(int(step["ms"]), MAX_SCRIPT_WAIT_MS)) / 1000)
                 entry["result"] = f"waited {step['ms']}ms"
@@ -1353,16 +961,6 @@ def run_steps(steps: list[dict], delay_ms: int = 120, stop_on_error: bool = True
             stopped_at = i
             break
 
-        interrupted = input_guard.guard().human_events - keys_at_start
-        if interrupted and stop_if_user_types:
-            entry["user_interrupted"] = interrupted
-            stopped_at = i
-            break
-        # Renew rather than take: a script longer than one lease must not have
-        # the keyboard fall back to the person halfway through it, and a script
-        # that dies here still only holds it for the rest of one lease.
-        input_guard.renew(_SCRIPT_LEASE)
-
     if stopped_at is not None and not images:
         final = _try_grab()
         if final is not None:
@@ -1371,22 +969,12 @@ def run_steps(steps: list[dict], delay_ms: int = 120, stop_on_error: bool = True
 
     summary = {
         "ok": stopped_at is None and all(s["ok"] for s in report),
-        # Steps ATTEMPTED, not steps that succeeded -- so a script stopped by
-        # its first step reports performed: 1 with that step's ok: false. That
-        # reads wrong, and it disagrees with the single-action refusal, which
-        # reports "performed": false for the same event. Left alone deliberately
-        # rather than fixed in passing: three assertions in tests\smoke.py
-        # encode this meaning, and smoke.py cannot currently be run (it launches
-        # Notepad, whose saved session is a pending decision). Changing a field
-        # and its tests together, with the tests unrunnable, would be a change
-        # nobody had checked. See docs\STATUS.md.
+        # Compatibility field: counts attempted steps, including failures.
         "performed": len(report),
         "of": len(steps),
         "stopped_at_step": stopped_at,
         "steps": report,
         "images": [label for label, _ in images],
-        **({"stopped_because": _INTERRUPTED_NOTE.format(n=interrupted).strip(" -")}
-           if interrupted and stop_if_user_types else {}),
         "note": (
             "Images follow in the order listed. Coordinates in a cropped capture are offset by "
             "its region's top-left. Only the regions captured here count as looked at; a later "
@@ -1399,104 +987,40 @@ def run_steps(steps: list[dict], delay_ms: int = 120, stop_on_error: bool = True
 
 @tool
 def release_control() -> str:
-    """Give the desktop back: put whatever window the person was using before
-    this run took focus back in front. Call it when you have finished a piece
-    of work and are about to think, report, or wait -- not between two steps
-    of one interaction, because a menu or dropdown you just opened closes the
-    moment its window loses focus.
-
-    Nothing else is lost by calling it. The window stays attached, and reading
-    it (screenshot, wait_stable, locate_in_region, diff_since_snapshot) does
-    not need it in front -- only sending input does, and the next action
-    raises it again by itself. The tracking outline is removed too, and comes
-    back with the next action. The person's keyboard is handed back as well,
-    though an action that is not running is not holding it anyway."""
+    """Hide an explicitly requested overlay. Background control takes no focus."""
     get_overlay().untrack()
-    input_guard.guard().release("control released")
-    title = window_manager.restore_foreground()
-    if title is None:
-        return "nothing to give back -- no window was displaced, or it has since closed"
-    return (f'foreground returned to "{title}"; outline hidden; keyboard released; '
-            "reading the attached window still works")
+    return "outline hidden; mouse, keyboard and foreground were never taken"
 
 
 @tool
 def keep_foreground(enabled: bool) -> str:
-    """Stop giving the person their window back after every action, or start again.
-
-    By default every action that takes the foreground hands it back the moment
-    it finishes, so the person can type into their own window during the gaps
-    without their keystrokes landing in the app being automated.
-
-    Call keep_foreground(true) before an interaction that spans several tool
-    calls and would break if focus moved between them: a Blender G/R/S
-    transform, a rubber-band selection continued in a later call, or a menu the
-    app draws itself -- Windows does not report those, so the automatic
-    hand-back cannot know to skip them. Call keep_foreground(false) afterwards.
-
-    Menus that Windows owns are already handled: the hand-back skips itself
-    while one is open, and does not lose track of the window it owes."""
-    _focus_return["enabled"] = not bool(enabled)
+    """Compatibility tool. True is unsupported; False keeps background mode."""
     if enabled:
-        return ("holding the foreground; the person will NOT get their window back "
-                "between actions. Call keep_foreground(false) when the interaction "
-                "is over, or release_control() to hand it back now")
-    title, reason = window_manager.hand_back_foreground()
-    return ("handing the foreground back after each action again; "
-            + (f'gave it back to "{title}" now' if title else f"nothing given back now ({reason})"))
+        input_sim.unsupported("keep_foreground(True)")
+    return "pywinauto UIA background mode; foreground unchanged"
 
 
 @tool
 def keyboard_status() -> str:
-    """Did the person touch the keyboard? Answers that and nothing more.
-
-    While an action or a script runs, their keystrokes are held out so they
-    cannot land in the middle of what is being typed; ours carry a signature
-    that lets them through the same block. This reports whether the block is
-    on, how long it has left, and whether any human key event has happened --
-    a count and a time, never which keys. Nothing that could reconstruct what
-    anyone typed is recorded anywhere, by design.
-
-    `latched_off_by_user` means the person pressed Escape three times to demand
-    the keyboard back. Nothing will block it again until release_keyboard()
-    is called, and that is deliberate: someone who reaches for that is having a
-    problem, so treat it as a stop signal, not something to work around."""
-    state = input_guard.guard().status()
-    state["watching"] = input_guard.hook_installed()
-    state["blocking_enabled"] = input_guard.enabled
-    return json.dumps(state, ensure_ascii=False)
+    """Report background mode. No global input is blocked or monitored."""
+    return json.dumps({
+        "backend": "pywinauto-uia", "blocking": False, "watching": False,
+        "blocking_enabled": False, "lease_remaining_s": 0,
+        "latched_off_by_user": False, "human_key_events": None,
+        "seconds_since_human_key": None, "last_releases": [],
+    })
 
 
 @tool
 def release_keyboard(enable_blocking: bool = True) -> str:
-    """Give the keyboard back to the person right now, and clear the latch set
-    by their triple-Escape so normal operation can resume.
-
-    Call it when you have finished driving and are about to think, report or
-    wait -- the companion to release_control(), which does the same for the
-    foreground. Pass enable_blocking=false to leave blocking switched off for
-    the rest of the session, so nothing holds their keyboard again."""
-    input_guard.enabled = bool(enable_blocking)
-    guard = input_guard.guard()
-    guard.release("release_keyboard()")
-    guard.rearm()
-    return (
-        "keyboard released and the escape latch cleared; "
-        + ("actions will hold it again while they run"
-           if input_guard.enabled else
-           "blocking is now OFF for the rest of this session")
-    )
+    """Compatibility no-op: keyboard blocking cannot be enabled in this backend."""
+    return "keyboard blocking is OFF; background UIA never holds or monitors input"
 
 
 @tool
 def hotkey(keys: list[str]) -> str:
-    """Press a chord of keys together, e.g. ["ctrl", "shift", "p"] for
-    Ctrl+Shift+P. Holds each key down in order, then releases in reverse
-    order. Each entry is a SPECIAL_KEYS name (see press_key) or a single
-    a-z/0-9 letter/digit."""
-    hwnd = _require_attached()
-    input_sim.press_keys(keys, hwnd=hwnd)
-    return f"pressed chord {'+'.join(keys)}"
+    """Unsupported in background UIA. Activate a named command instead."""
+    input_sim.press_keys(keys, hwnd=_require_attached())
 
 
 @tool
