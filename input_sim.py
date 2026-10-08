@@ -6,10 +6,38 @@ Coordinates resolve against the attached window's own tree even if covered.
 import math
 import threading
 import uia_inspect as uia
-from window_manager import background_action, ensure_input_allowed, get_client_size
+from window_manager import background_action, ensure_input_allowed, get_client_size, get_client_rect_screen
 
 _targets = {}
 _lock = threading.RLock()
+_interaction_hook = None
+
+
+def set_interaction_hook(hook):
+    """Register a cosmetic observer receiving (hwnd, client_relative_rect)."""
+    global _interaction_hook
+    _interaction_hook = hook
+
+
+def _interaction_rect(hwnd, wrapper):
+    try:
+        rect = wrapper.rectangle()
+        left, top, right, bottom = get_client_rect_screen(hwnd)
+        bounds = (max(0, rect.left - left), max(0, rect.top - top),
+                  min(right - left, rect.right - left), min(bottom - top, rect.bottom - top))
+        if bounds[2] > bounds[0] and bounds[3] > bounds[1]:
+            return bounds
+    except Exception:
+        pass  # A cosmetic marker must not block an otherwise supported action.
+    return None
+
+
+def _show_interaction(hwnd, rect):
+    if _interaction_hook is not None and rect is not None:
+        try:
+            _interaction_hook(hwnd, rect)
+        except Exception:
+            pass  # Do not invite a retry of a mutation that already succeeded.
 
 
 class UnsupportedAction(ValueError):
@@ -102,11 +130,13 @@ def _actionable(wrapper):
 
 def _activate(hwnd, wrapper):
     _actionable(wrapper)
+    rect = _interaction_rect(hwnd, wrapper)
     kind = wrapper.element_info.control_type
     if kind in ("Edit", "Document"):
         if uia.pattern(wrapper, "value") is None:
             unsupported("selecting a text control without ValuePattern")
         _remember(hwnd, wrapper)
+        _show_interaction(hwnd, rect)
         return "selected text target (Windows focus unchanged)"
     toggle = uia.pattern(wrapper, "toggle")
     selection = uia.pattern(wrapper, "selection_item")
@@ -136,6 +166,7 @@ def _activate(hwnd, wrapper):
         action = "toggled"
     else:
         unsupported(f"activating {kind}")
+    _show_interaction(hwnd, rect)
     return action
 
 
@@ -177,6 +208,7 @@ def type_text(text, hwnd=None, name=None, automation_id=None, replace=False):
         if value.CurrentIsReadOnly:
             raise ValueError("target text control is read-only")
         desired = text if replace else value.CurrentValue + text
+        rect = _interaction_rect(hwnd, wrapper)
         if wrapper.element_info.control_type == "Edit":
             wrapper.set_edit_text(desired)
         else:
@@ -184,6 +216,7 @@ def type_text(text, hwnd=None, name=None, automation_id=None, replace=False):
         if value.CurrentValue != desired:
             raise RuntimeError("text was set but readback differs; inspect the target before retrying")
         _remember(hwnd, wrapper)
+        _show_interaction(hwnd, rect)
         return {"action": "replaced" if replace else "appended", "characters": len(text),
                 "automation_id": wrapper.element_info.automation_id, "verified": True,
                 "backend": "pywinauto-uia"}
@@ -222,10 +255,12 @@ def set_value(hwnd, value, name=None, automation_id=None):
             raise ValueError(f"value must be between {iface.CurrentMinimum} and {iface.CurrentMaximum}")
         if iface.CurrentIsReadOnly:
             raise ValueError("target numeric control is read-only")
+        rect = _interaction_rect(hwnd, wrapper)
         iface.SetValue(numeric)
         actual = iface.CurrentValue
         if actual != numeric:
             raise RuntimeError(f"value readback differs: expected {numeric}, got {actual}")
+        _show_interaction(hwnd, rect)
         return {"value": actual, "verified": True, "backend": "pywinauto-uia"}
 
 
@@ -242,8 +277,10 @@ def scroll_in_window(hwnd, client_x, client_y, clicks, keep_cursor=False):
             _actionable(wrapper)
             iface = uia.pattern(wrapper, "scroll")
             if iface is not None and iface.CurrentVerticallyScrollable:
+                rect = _interaction_rect(hwnd, wrapper)
                 wrapper.scroll("up" if clicks > 0 else "down", "line",
                                count=abs(clicks), retry_interval=0.01)
+                _show_interaction(hwnd, rect)
                 return "scrolled through ScrollPattern"
             if uia.runtime_id(wrapper) == root_id:
                 break

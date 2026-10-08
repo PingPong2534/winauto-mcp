@@ -9,6 +9,7 @@ from contextlib import contextmanager
 import queue
 import threading
 
+import win32api
 import win32con
 import win32gui
 
@@ -34,6 +35,7 @@ class Overlay:
         self._drawn = None
         self._suspended = 0
         self._hwnd = None
+        self._label_hwnd = None
         self._error = None
         self._ready = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -48,6 +50,11 @@ class Overlay:
         """The outline's own HWND, for diagnostics and window enumeration."""
         return self._hwnd
 
+    @property
+    def label_hwnd(self):
+        """The separate, click-through feature label outside the frame."""
+        return self._label_hwnd
+
     def _run(self):
         name = f"winauto_overlay_{id(self)}"
         registered = False
@@ -57,13 +64,15 @@ class Overlay:
             wc.lpfnWndProc = self._window_proc
             win32gui.RegisterClass(wc)
             registered = True
+            style = (win32con.WS_EX_LAYERED | win32con.WS_EX_TRANSPARENT
+                     | win32con.WS_EX_NOACTIVATE | win32con.WS_EX_TOPMOST
+                     | win32con.WS_EX_TOOLWINDOW)
             self._hwnd = win32gui.CreateWindowEx(
-                win32con.WS_EX_LAYERED | win32con.WS_EX_TRANSPARENT
-                | win32con.WS_EX_NOACTIVATE | win32con.WS_EX_TOPMOST
-                | win32con.WS_EX_TOOLWINDOW,
-                name, "", win32con.WS_POPUP, 0, 0, 1, 1, 0, 0, 0, None,
-            )
-            win32gui.SetLayeredWindowAttributes(self.hwnd, 0, 255, win32con.LWA_COLORKEY)
+                style, name, "", win32con.WS_POPUP, 0, 0, 1, 1, 0, 0, 0, None)
+            self._label_hwnd = win32gui.CreateWindowEx(
+                style, name, "", win32con.WS_POPUP, 0, 0, 1, 1, 0, 0, 0, None)
+            for hwnd in (self.hwnd, self.label_hwnd):
+                win32gui.SetLayeredWindowAttributes(hwnd, 0, 255, win32con.LWA_COLORKEY)
             if not ctypes.windll.user32.SetTimer(ctypes.c_void_p(self.hwnd), 1, self._poll_ms, None):
                 raise ctypes.WinError()
             self._ready.set()
@@ -72,6 +81,8 @@ class Overlay:
             self._error = exc
         finally:
             self._ready.set()
+            if self.label_hwnd and win32gui.IsWindow(self.label_hwnd):
+                win32gui.DestroyWindow(self.label_hwnd)
             if self.hwnd and win32gui.IsWindow(self.hwnd):
                 win32gui.DestroyWindow(self.hwnd)
             if registered:
@@ -89,14 +100,16 @@ class Overlay:
         if msg == win32con.WM_MOUSEACTIVATE:
             return win32con.MA_NOACTIVATE
         if msg == win32con.WM_DESTROY:
-            ctypes.windll.user32.KillTimer(ctypes.c_void_p(hwnd), 1)
-            win32gui.PostQuitMessage(0)
+            if hwnd == self.hwnd:
+                ctypes.windll.user32.KillTimer(ctypes.c_void_p(hwnd), 1)
+                win32gui.PostQuitMessage(0)
             return 0
         return win32gui.DefWindowProc(hwnd, msg, wp, lp)
 
     def _hide(self):
         self._drawn = None
         win32gui.ShowWindow(self.hwnd, win32con.SW_HIDE)
+        win32gui.ShowWindow(self.label_hwnd, win32con.SW_HIDE)
 
     def _tick(self):
         try:
@@ -153,6 +166,52 @@ class Overlay:
         self._drawn = state
         win32gui.InvalidateRect(self.hwnd, None, False)
         win32gui.UpdateWindow(self.hwnd)
+        self._position_label(rect)
+
+    @contextmanager
+    def _label_font(self, dc):
+        dpi = ctypes.windll.user32.GetDpiForWindow(ctypes.c_void_p(self.hwnd)) or 96
+        spec = win32gui.LOGFONT()
+        spec.lfFaceName = "Segoe UI"
+        spec.lfHeight = -round(16 * dpi / 96)
+        font = win32gui.CreateFontIndirect(spec)
+        old_font = win32gui.SelectObject(dc, font)
+        try:
+            yield
+        finally:
+            win32gui.SelectObject(dc, old_font)
+            win32gui.DeleteObject(font)
+
+    def _position_label(self, rect):
+        if not self._label:
+            win32gui.ShowWindow(self.label_hwnd, win32con.SW_HIDE)
+            return
+        monitor = win32api.GetMonitorInfo(win32api.MonitorFromRect(
+            rect, win32con.MONITOR_DEFAULTTONEAREST))["Monitor"]
+        ml, mt, mr, mb = monitor
+        left, top, right, bottom = rect
+        dc = win32gui.GetDC(self.label_hwnd)
+        try:
+            with self._label_font(dc):
+                text_width, text_height = win32gui.GetTextExtentPoint32(dc, self._label)
+        finally:
+            win32gui.ReleaseDC(self.label_hwnd, dc)
+        width = min(text_width + 16, max(32, right - left - 16), mr - ml)
+        height = text_height + 8
+        x = max(ml, min(left + 8, mr - width))
+        y = max(mt, min(top, mb - height))
+        # Every candidate is outside the frame; never clamp it into the app.
+        candidates = ((x, top - height - 4), (x, bottom + 4),
+                      (right + 4, y), (left - width - 4, y))
+        for x, y in candidates:
+            if ml <= x and mt <= y and x + width <= mr and y + height <= mb:
+                win32gui.SetWindowPos(
+                    self.label_hwnd, win32con.HWND_TOPMOST, x, y, width, height,
+                    win32con.SWP_NOACTIVATE | win32con.SWP_SHOWWINDOW)
+                win32gui.InvalidateRect(self.label_hwnd, None, False)
+                win32gui.UpdateWindow(self.label_hwnd)
+                return
+        win32gui.ShowWindow(self.label_hwnd, win32con.SW_HIDE)
 
     def _paint(self, hwnd):
         dc, paint = win32gui.BeginPaint(hwnd)
@@ -161,6 +220,9 @@ class Overlay:
             win32gui.FillRect(dc, (left, top, right, bottom),
                               win32gui.GetStockObject(win32con.BLACK_BRUSH))
             if self._drawn is None:
+                return
+            if hwnd == self.label_hwnd:
+                self._paint_label(dc, self._drawn[2], right, bottom)
                 return
             brush = win32gui.SelectObject(dc, win32gui.GetStockObject(win32con.NULL_BRUSH))
             try:
@@ -176,41 +238,25 @@ class Overlay:
                         win32gui.DeleteObject(pen)
             finally:
                 win32gui.SelectObject(dc, brush)
-            if self._drawn[2]:
-                self._paint_label(dc, self._drawn[2], right, bottom)
         finally:
             win32gui.EndPaint(hwnd, paint)
 
     def _paint_label(self, dc, label, width, height):
-        dpi = ctypes.windll.user32.GetDpiForWindow(ctypes.c_void_p(self.hwnd)) or 96
-        spec = win32gui.LOGFONT()
-        spec.lfFaceName = "Segoe UI"
-        spec.lfHeight = -round(16 * dpi / 96)
-        font = win32gui.CreateFontIndirect(spec)
-        old_font = win32gui.SelectObject(dc, font)
-        try:
-            text_width, text_height = win32gui.GetTextExtentPoint32(dc, label)
-            right = min(width - 8, 8 + text_width + 16)
-            bottom = min(height - 2, text_height + 10)
-            if right <= 16 or bottom <= 4:
-                return
+        with self._label_font(dc):
             bg = win32gui.CreateSolidBrush(_color(LABEL_BG_COLOR))
             try:
-                win32gui.FillRect(dc, (8, 1, right, bottom), bg)
+                win32gui.FillRect(dc, (0, 0, width, height), bg)
             finally:
                 win32gui.DeleteObject(bg)
             old_color = win32gui.SetTextColor(dc, _color("#FFFFFF"))
             old_mode = win32gui.SetBkMode(dc, win32con.TRANSPARENT)
             try:
-                win32gui.DrawText(dc, label, -1, (16, 2, right - 8, bottom - 2),
+                win32gui.DrawText(dc, label, -1, (8, 0, width - 8, height),
                                   win32con.DT_SINGLELINE | win32con.DT_VCENTER
                                   | win32con.DT_END_ELLIPSIS | win32con.DT_NOPREFIX)
             finally:
                 win32gui.SetBkMode(dc, old_mode)
                 win32gui.SetTextColor(dc, old_color)
-        finally:
-            win32gui.SelectObject(dc, old_font)
-            win32gui.DeleteObject(font)
 
     # Thread-safe public API.
     def track(self, hwnd):

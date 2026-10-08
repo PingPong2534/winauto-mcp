@@ -85,10 +85,22 @@ overlays do not implement input control.
 Attach shows the green outline and clears prior highlights. The overlay has
 WS_EX_NOACTIVATE and WS_EX_TRANSPARENT and does not raise the target.
 The optional attach `label` is a single-line Unicode string, at most 120
-characters, drawn on a contrasting top tab with ellipsis when necessary.
+characters, drawn in a separate non-activating, click-through native window
+outside the client outline, with ellipsis when necessary. Prefer above, then
+below, then either side within the target monitor's bounds; hide the label
+if no exterior space fits. Never move the label inside the frame. Hide both
+decoration windows during release, target hiding, detach and screen capture.
 An empty label removes the tab; a new attach replaces the prior label and
 includes it in the journal session name. It does not select or type into the app.
-Detach, release_control and highlight([]) hide it; reattach shows it again.
+Successful UIA mutations replace debug boxes with one red box for their resolved
+target (the scrollable ancestor for scroll). Edit selection also counts as an
+interaction. Bounds are captured before mutation, so controls destroyed by a
+successful action can still be indicated. Reads and errors do not change the box.
+This applies to individual tools and each run_steps mutation. Cosmetic failures
+must not turn a completed UIA mutation into an error. No COM wrappers are retained.
+If a provider has no usable in-client bounds, the previous box is left unchanged.
+Detach, release_control and highlight([]) hide it; reattach or the next successful
+interaction shows it again, preserving the feature label for the attached target.
 Screen fallback temporarily hides this decoration and restores it after capture
 or refusal; other covering windows still cause a refusal.
 

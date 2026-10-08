@@ -56,10 +56,18 @@ activation by standard Win32 UIA providers. A target already in the foreground
 is left as it is. No focus-restoration loop runs; it would override a person's
 window switch. Custom providers and newly opened popups may still activate.
 
-`attach_window(hwnd, label="...")` displays a Unicode feature label at the top
-of the green outline. Omit it or pass an empty string for no label. Labels are
+`attach_window(hwnd, label="...")` displays a Unicode feature label outside,
+above the green outline. It moves below or beside the frame when needed and
+hides if no exterior screen space is available. Omit it or pass an empty string
+for no label. Labels are
 single-line, at most 120 characters; long text is ellipsized to fit the window.
 The label is visual only and is also included in the journal session name.
+
+Successful clicks, text writes, numeric writes and scrolls automatically show a
+red rectangle around the last control acted on, including `run_steps` actions.
+Each interaction replaces the previous rectangle and keeps the feature label.
+Reads and refused/failed actions leave it unchanged. The rectangle is a snapshot
+of the control's bounds at the interaction, not a live UIA tracker after layout changes.
 
 ## Compatibility and limits
 
@@ -71,7 +79,8 @@ The label is visual only and is also included in the journal session name.
   compatibility and have no effect.
 - `keyboard_status` reports blocking/watching off; `release_keyboard` is a no-op.
   No global keyboard/mouse hooks are installed. `release_control` hides the
-  outline and debug highlights; the window stays attached. Reattach to show it again.
+  outline and debug highlights; the window stays attached. Reattach or perform a
+  successful interaction to show it again.
 - Canvas controls without UIA action patterns cannot be controlled. Screenshots
   and pixel inspection remain available where the app supports capture.
 - Higher-integrity writes are refused before action. Reads depend on the app's

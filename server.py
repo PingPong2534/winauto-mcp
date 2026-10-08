@@ -122,6 +122,16 @@ _state = {
 }
 
 
+def _show_latest_interaction(hwnd, rect):
+    if hwnd == _state["hwnd"] and window_manager.window_exists(hwnd):
+        overlay = get_overlay()
+        overlay.set_highlights([rect])
+        overlay.track(hwnd)
+
+
+input_sim.set_interaction_hook(_show_latest_interaction)
+
+
 def _require_attached() -> int:
     hwnd = _state["hwnd"]
     if hwnd is None:

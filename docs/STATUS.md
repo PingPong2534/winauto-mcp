@@ -21,11 +21,15 @@ Verified on 2026-10-08 in `feat/pywinauto-backend`.
 - Suppress standard Win32 UIA provider activation during background mutations
   with a temporary WS_EX_NOACTIVATE bit. Restore it on success and failure.
 - Optional `attach_window(..., label="...")` shows a Thai/Unicode feature label
-  on the outline and includes it in the journal session name.
+  outside the outline and includes it in the journal session name. A separate
+  non-activating, click-through label window follows the frame without covering
+  its interior; placement prefers above, with exterior fallback positions.
+- Successful interactions automatically outline the resolved control in red;
+  the latest box replaces prior boxes and keeps the feature label.
 
 ## Evidence
 
-The current suite contains 30 tests: 24 UIA tests, five native outline tests
+The current suite contains 33 tests: 25 UIA tests, seven native outline tests
 and one real MCP stdio test.
 Live controls verify button handler invocation, Thai/emoji/literal text,
 checkbox state, slider readback and list scrolling while a separate owned
@@ -40,8 +44,15 @@ without activation, layered/mouse-through styles, reattachment/highlight clearin
 retargeting, move/resize/hide/restore, detach, and clean screen fallback followed
 by outline restoration. These use owned test windows, not a user's application.
 Labels are verified through real desktop pixels, including Thai, long-label
-clipping, clearing and hide/show persistence. Guard tests cover style restoration
+clipping, exterior placement, movement, edge fallback, hiding when no exterior
+space fits, clearing and hide/show persistence. Both decoration windows are
+hidden during screen fallback; the label retains no-activate/mouse-through styles.
+Guard tests cover style restoration
 after errors, preservation of other style bits and an already-foreground target.
+Live red-box tests cover clicks, logical edit selection, text/range writes,
+scroll containers, script steps, unchanged markers on reads/refusals, and
+label-preserving restoration after release. A failed cosmetic observer does
+not report a completed invocation as failed or cause a second invocation.
 
 Other cases cover duplicate selectors, disabled/read-only/canvas refusals,
 incomplete-tree refusal, unsupported gestures, batch prevalidation/runtime stop, synthetic UIPI

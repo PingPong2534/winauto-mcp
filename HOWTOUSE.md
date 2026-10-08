@@ -6,7 +6,9 @@ Call `list_windows`, then `attach_window(hwnd)`. Attaching shows a green
 client-area outline without raising the target or taking focus. The outline
 passes mouse input through and follows the target; reattaching clears old highlights.
 Use `attach_window(hwnd, label="Feature: Save customer")` to name the current
-test on the outline. Labels support Thai, are single-line, and accept at most
+test outside the outline. The label sits above the frame, or below/beside it
+when space is limited; it hides if no exterior screen space is available.
+Labels support Thai, are single-line, and accept at most
 120 characters. Omit the label or pass `""` to clear it on the next attach.
 `take_control=True` is unsupported. `capture_screen` returns the full client
 image plus a UIA summary; `get_elements` returns detailed JSON. Every element
@@ -23,6 +25,11 @@ unique; selection is scoped to the attached window.
 Background UIA writes temporarily mark the target WS_EX_NOACTIVATE, then restore
 the added bit even on errors. The server never forces the previous window back
 to the foreground. App-created popups/custom providers can still change focus.
+
+The last successful click/type/set_value/scroll is outlined in red automatically,
+including script steps. Failed/refused actions and reads do not move the box.
+Each successful interaction replaces manual debug boxes but keeps the attach
+label. The box records bounds at the action; layout changes may move the control.
 
 ```python
 # Illustrative MCP call sequence, using IDs obtained from get_elements.
@@ -120,7 +127,7 @@ capture/check checkpoint, not simply the immediately previous action.
 evidence. Journals live under `%TEMP%\winauto-mcp` and retain five sessions.
 `highlight` shows red debug rectangles; an empty list hides the overlay.
 `release_control` hides the outline and rectangles while keeping the target attached.
-Call `attach_window` again to restore the green outline.
+Reattach or perform a successful interaction to restore the outline and label.
 `heap_snapshot`/`heap_diff` are optional .NET diagnostics requiring
 `dotnet-gcdump`; a heap collection pauses the target for GC and must be assessed
 separately from UI control.

@@ -210,6 +210,16 @@ class BackgroundTests(unittest.TestCase):
             with window_manager.background_action(self.window.hwnd):
                 pass
 
+    def test_cosmetic_failure_does_not_fail_completed_invocation(self):
+        count = self.window.invocations
+        with patch.object(input_sim, "_interaction_hook", side_effect=RuntimeError("overlay unavailable")):
+            result = json.loads(server.click_element("Run"))
+        self.assertEqual(result["action"], "invoked")
+        deadline = time.monotonic() + 2
+        while self.window.invocations == count and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertEqual(self.window.invocations, count + 1)
+
     def test_inspection_scoped_to_covered_target(self):
         elements = json.loads(server.get_elements())
         run = next(e for e in elements if e["automation_id"] == "201")
