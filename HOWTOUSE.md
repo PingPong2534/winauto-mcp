@@ -13,7 +13,8 @@ Labels support Thai, are single-line, and accept at most
 `take_control=True` is unsupported. `capture_screen` returns the full client
 image plus a UIA summary; `get_elements` returns detailed JSON. Every element
 has `name`, `automation_id`, `control_type`, `enabled`, `rect`, `runtime_id`
-and `actions`. Rectangles and coordinates are client-relative physical pixels.
+and `actions`, plus `control_steps` for a control-scoped set. Rectangles and
+coordinates are client-relative physical pixels.
 
 Prefer a unique automation ID; exact case-insensitive names are considered
 before substring names. An ambiguous selector errors rather than choosing the
@@ -61,6 +62,39 @@ retrying. `force=True` bypasses only this image comparison.
 `scroll(x,y,clicks)` finds a vertical ScrollPattern on the pointed element or
 an ancestor inside the target. Positive is up, negative down, maximum 100
 small UIA steps per call. Step distance is provider-defined.
+
+## One control, multiple steps
+
+Use `control_set` when the next actions belong to one control. Obtain its unique
+selector, control_type and control_steps from `get_elements` first. For a writable
+textbox, send click, type and capture together:
+
+```python
+control_set(
+    automation_id="nameField",
+    expected_control_type="EditControl",
+    steps=[
+        {"do": "click"},
+        {"do": "type", "text": "ทดสอบข้อมูลลูกค้า", "replace": True},
+        {"do": "capture"},
+    ],
+)
+```
+
+All steps use the same runtime ID. The set validates every step and capability
+before starting; a disappeared control stops the set instead of redirecting it
+to another matching field. Text is verified by readback. No physical click or
+Windows focus change is requested. Text defaults to append; use replace=True to
+set the complete value. The set allows up to 20 steps, with one final capture;
+delay_ms (0–3000, default 120) lets the app repaint between steps.
+
+The response contains a JSON report and one PNG cropped to the textbox's current
+visible rectangle, including its frame, at original resolution. It supplies
+region, crop_size and coordinate_offset; the crop's (0,0) is that offset in the
+attached client area. It does not send a full-window screenshot. On runtime
+failure it returns a report with completed steps and no image; actions are not
+rolled back, so inspect the report before retrying. Covered capture remains
+dependent on PrintWindow; there is no stale-image or foreground fallback.
 
 ## Unsupported actions
 

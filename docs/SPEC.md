@@ -21,14 +21,14 @@ second; automation IDs match exactly. Action selection refuses multiple
 matches. Action traversal refuses a truncated or unreadable tree rather than assuming uniqueness from a partial search. `get_elements` is an inspection list, not
 permission to operate a canvas or unsupported pattern.
 
-## 34 MCP tools
+## 35 MCP tools
 
 | Group | Tools | Contract |
 | --- | --- | --- |
 | Attachment | `list_windows`, `attach_window`, `detach_window` | Background target selection with a green client outline; take_control=True refused |
 | Inspection | `capture_screen`, `screenshot`, `capture_region`, `get_elements`, `read_element` | Client pixels/tree/state; read_element hides password text |
 | UIA actions | `click`, `click_element`, `type_text`, `scroll`, `set_value` | Semantic patterns only; enabled/read-only/integrity checks |
-| Waits/scripts | `wait_for`, `wait_stable`, `run_steps` | Explicit waits; prevalidated batch; journal each step |
+| Waits/scripts | `wait_for`, `wait_stable`, `run_steps`, `control_set` | Explicit waits; prevalidated batches; control_set binds one control and returns only its crop |
 | Pixel/cache helpers | `locate_in_region`, `snapshot`, `diff_since_snapshot`, `remember_location`, `recall_location` | Freshness and pixel evidence; cache reverified |
 | Debug/evidence | `highlight`, `release_control`, `history`, `replay_frame` | Explicit visual overlay and journal; replay is downscaled |
 | Heap | `heap_snapshot`, `heap_diff` | .NET gcdump, optional external tool, blocking GC |
@@ -53,6 +53,32 @@ Text labels do not eclipse enclosing buttons. No Desktop.from_point is used.
 There is no SendInput, click_input, type_keys, set_focus or Win32 foreground
 operation in production control paths. UIA provider behavior remains owned by
 the target application and is not a universal guarantee of background access.
+
+## Control-scoped steps
+
+`control_set(steps, name=None, automation_id=None, expected_control_type=None,
+delay_ms=120)` resolves one unique control inside the attached window. It accepts
+up to 20 steps: `click`, `type` (string `text`, optional boolean `replace`),
+and one required final `capture`. Unknown fields, per-step selectors/coordinates,
+unsupported capabilities, invalid delays and type mismatches reject the set
+before mutation. `get_elements` exposes each control's available `control_steps`;
+Edit/Document controls with writable ValuePattern support all three steps.
+Defaults for text match `type_text`: append, or replace the entire value.
+
+Bind the initial runtime ID and re-resolve it before each step. Never select a
+replacement control by name/automation ID if the original disappears. Wrappers
+stay within this call's COM session. Recheck enabled/read-only/integrity state
+before each mutation; verify text readback. Click on text selects the logical
+target without taking focus. Each attempted step is journaled as `control:<do>`.
+
+Final capture uses a fresh attached-window frame and current control bounds,
+clipped to the client area. Refuse changed geometry during capture or unavailable
+pixels; never return an earlier frame or a full-window image on failure. The
+response contains a JSON report and, on success, one original-size PNG of the
+control's visible rectangle, including its frame. Return region, crop_size and
+coordinate_offset; only this crop counts as seen. Internal journal frames may
+cover the full client area. Runtime failures stop immediately and report completed
+steps without rollback; callers must inspect the report before retrying mutations.
 
 ## Compatibility changes
 
@@ -110,5 +136,5 @@ or refusal; other covering windows still cause a refusal.
 exercise real Value/Invoke/Toggle/RangeValue/Scroll patterns under a cover,
 refusals, readback, script/journal behavior, worker COM and STA hosting. Real
 stdio tests initialize the server from a different directory and verify all
-34 tool names. Historical probes in `tests/legacy` are excluded and require
+35 tool names. Historical probes in `tests/legacy` are excluded and require
 the former backend revision.

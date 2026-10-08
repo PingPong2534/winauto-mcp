@@ -25,8 +25,10 @@ class TransportTests(unittest.TestCase):
                     self.assertEqual(info.server_info.name, "winauto-mcp")
                     listing = await session.list_tools()
                     names = {tool.name for tool in listing.tools}
-                    self.assertEqual(len(names), 34)
-                    self.assertTrue({"read_element", "set_value", "run_steps"} <= names)
+                    self.assertEqual(len(names), 35)
+                    self.assertTrue({"read_element", "set_value", "run_steps", "control_set"} <= names)
+                    control = next(tool for tool in listing.tools if tool.name == "control_set")
+                    self.assertEqual(control.input_schema["properties"]["steps"]["type"], "array")
                     attach = next(tool for tool in listing.tools if tool.name == "attach_window")
                     self.assertEqual(attach.input_schema["properties"]["label"]["type"], "string")
                     result = await session.call_tool("keyboard_status", {})
@@ -39,6 +41,11 @@ class TransportTests(unittest.TestCase):
                     self.assertTrue(result.is_error)
                     message = next(b.text for b in result.content if b.type == "text")
                     self.assertIn("no window attached", message)
+                    result = await session.call_tool("control_set", {
+                        "automation_id": "101", "steps": [{"do": "capture"}],
+                    })
+                    self.assertTrue(result.is_error)
+                    self.assertIn("no window attached", next(b.text for b in result.content if b.type == "text"))
 
         with tempfile.TemporaryDirectory(prefix="winauto-transport-") as cwd:
             asyncio.run(scenario(cwd))

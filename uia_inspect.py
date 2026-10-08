@@ -77,6 +77,22 @@ def runtime_id(wrapper):
     return tuple(wrapper.element_info.runtime_id)
 
 
+def control_steps(wrapper):
+    """Advertise capabilities for a set bound to this control, never real input."""
+    steps = []
+    if wrapper.is_enabled():
+        if wrapper.element_info.control_type in ("Edit", "Document"):
+            value = pattern(wrapper, "value")
+            if value is not None:
+                steps.append("click")
+                if not value.CurrentIsReadOnly:
+                    steps.append("type")
+        elif any(pattern(wrapper, name) is not None for name in
+                 ("invoke", "toggle", "selection_item", "expand_collapse")):
+            steps.append("click")
+    return [*steps, "capture"]
+
+
 def describe(wrapper, hwnd):
     info = wrapper.element_info
     rect = wrapper.rectangle()
@@ -93,6 +109,7 @@ def describe(wrapper, hwnd):
         "enabled": bool(wrapper.is_enabled()),
         "rect": [rect.left - left, rect.top - top, rect.right - left, rect.bottom - top],
         "runtime_id": list(runtime_id(wrapper)), "actions": actions,
+        "control_steps": control_steps(wrapper),
     }
 
 

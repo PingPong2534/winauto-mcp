@@ -46,6 +46,7 @@ import time
 from mcp.server.mcpserver import Image, MCPServer
 
 import heap
+import control_sets
 import input_sim
 import integrity
 import journal
@@ -71,6 +72,11 @@ mcp = MCPServer(
         "caret; replace=True replaces the entire value. Supply name or "
         "automation_id for every field in a form. read_element reads values "
         "and selection/toggle states; text and numeric writes verify readback. "
+        "get_elements also lists control_steps. For one textbox, use control_set "
+        "with one selector and steps click, type(text, replace=True), capture. "
+        "It binds the original runtime ID, validates all capabilities first and "
+        "returns only the control's cropped image plus its coordinate offset. "
+        "Check ok/completed_steps before retrying a failed set; no rollback occurs. "
         "UIA providers can have their own focus/popup behavior. Canvas-only "
         "apps and unsupported patterns cannot be controlled in this backend. "
         "hover, coordinate drag, right/double/modifier clicks and keyboard "
@@ -534,7 +540,8 @@ def capture_region(x1: int, y1: int, x2: int, y2: int):
 @tool
 def get_elements() -> str:
     """UI Automation element list for the attached window only (no screenshot),
-    as JSON with name, automation_id, control_type, enabled, actions and rect.
+    as JSON with name, automation_id, control_type, enabled, actions,
+    control_steps and rect. control_steps lists capabilities for control_set.
     rect is client-relative, same space as capture_screen's image."""
     hwnd = _require_attached()
     return json.dumps(uia_inspect.get_elements(hwnd), ensure_ascii=False)
@@ -545,6 +552,32 @@ def read_element(name: str | None = None, automation_id: str | None = None) -> s
     """Read a uniquely identified UIA element's value and selection/toggle state."""
     return json.dumps(input_sim.read_element(_require_attached(), name, automation_id),
                       ensure_ascii=False)
+
+
+@tool
+def control_set(steps: list[dict], name: str | None = None,
+                automation_id: str | None = None, expected_control_type: str | None = None,
+                delay_ms: int = 120):
+    """Run 1–20 supported steps on ONE uniquely selected control.
+    Obtain control_steps and control_type from get_elements. Steps use do=click,
+    type (text, optional replace=False), and one required final capture. Example:
+    [{"do":"click"},{"do":"type","text":"Alice","replace":true},{"do":"capture"}].
+    No per-step selectors/coordinates. expected_control_type checks the actual
+    type, e.g. EditControl, before action. Text click selects without focus;
+    writes verify readback. All steps are validated before mutation, then bound
+    to the original runtime ID. delay_ms is 0–3000 between mutations and capture.
+    Return JSON report and ONE control-only PNG with region/crop_size/offset.
+    Runtime errors stop with completed_steps and no image; no rollback or stale
+    image fallback. Check report.ok before retrying completed writes.
+    """
+    report, frame, rect = control_sets.run(
+        _require_attached(), steps, name, automation_id, expected_control_type, delay_ms)
+    result = [json.dumps(report, ensure_ascii=False)]
+    if frame is not None:
+        _mark_seen(frame, rect)
+        journal_frame(frame)
+        result.append(Image(data=to_png(frame.crop(rect)), format="png"))
+    return result
 
 
 @tool

@@ -37,6 +37,22 @@ read_element(automation_id="customerName")
 click_element(automation_id="saveButton")
 ```
 
+For one textbox, `control_set` binds the control once, performs its supported
+steps and returns only its cropped frame. `get_elements` exposes `control_steps`.
+
+```python
+control_set(automation_id="customerName", expected_control_type="EditControl", steps=[
+    {"do": "click"},
+    {"do": "type", "text": "สวัสดี 😀", "replace": True},
+    {"do": "capture"},
+])
+```
+
+All steps are validated before mutation; each uses the original control's runtime
+ID. The final image includes only the control's visible rectangle and supplies
+its client-coordinate offset. Runtime errors report completed steps and return
+no image. See [HOWTOUSE.md](HOWTOUSE.md#one-control-multiple-steps) for limits.
+
 `click(x,y)` searches the attached window's own UIA tree, including when a
 separate window covers it. It activates the supported control enclosing that
 point. Selecting an edit only remembers a logical text target; it does not
@@ -92,7 +108,7 @@ of the control's bounds at the interaction, not a live UIA tracker after layout 
 
 ## Other tools
 
-The 34 tools also include cropped screenshots, pixel location/cache helpers,
+The 35 tools also include cropped screenshots, pixel location/cache helpers,
 explicit redraw waits, snapshots/diffs, scripted steps, journal replay,
 debug highlights and .NET heap snapshots. See [HOWTOUSE.md](HOWTOUSE.md) and
 [docs/SPEC.md](docs/SPEC.md) for contracts. Heap tools need `dotnet-gcdump` and

@@ -65,16 +65,18 @@ def _remember(hwnd, wrapper):
     _targets[hwnd] = uia.runtime_id(wrapper)
 
 
-def _find(hwnd, name=None, automation_id=None, selected=False, editable=False):
+def _find(hwnd, name=None, automation_id=None, selected=False, editable=False, target_id=None):
     if name is not None and not name.strip():
         raise ValueError("name must not be empty")
     if automation_id is not None and not automation_id.strip():
         raise ValueError("automation_id must not be empty")
-    if not editable and not selected and name is None and automation_id is None:
+    if not editable and not selected and target_id is None and name is None and automation_id is None:
         raise ValueError("provide name or automation_id from get_elements")
     matches = []
     needle = name.casefold().strip() if name is not None else None
-    remembered = _targets.get(hwnd) if selected and name is None and automation_id is None else None
+    remembered = target_id
+    if remembered is None and selected and name is None and automation_id is None:
+        remembered = _targets.get(hwnd)
     for wrapper in uia.walk(uia.root_wrapper(hwnd), strict=True):
         info = wrapper.element_info
         if remembered is not None and uia.runtime_id(wrapper) != remembered:
@@ -90,6 +92,8 @@ def _find(hwnd, name=None, automation_id=None, selected=False, editable=False):
         exact = [w for w in matches if (w.element_info.name or "").casefold().strip() == needle]
         matches = exact or matches
     if not matches:
+        if target_id is not None:
+            raise ValueError("the bound control disappeared; no replacement control was selected")
         if remembered is not None:
             raise ValueError("the selected element disappeared; select it again or supply name/automation_id")
         raise ValueError("no matching element in the attached window; check get_elements")
@@ -195,31 +199,36 @@ def click_element(hwnd, name=None, automation_id=None, button="left", double=Fal
         return {"action": action, "element": desc, "backend": "pywinauto-uia"}
 
 
+def _type_into(hwnd, wrapper, text, replace=False):
+    """Write to an already resolved wrapper in the caller's guarded COM session."""
+    _actionable(wrapper)
+    value = uia.pattern(wrapper, "value")
+    if value is None:
+        unsupported("text input without ValuePattern")
+    if value.CurrentIsReadOnly:
+        raise ValueError("target text control is read-only")
+    desired = text if replace else value.CurrentValue + text
+    rect = _interaction_rect(hwnd, wrapper)
+    if wrapper.element_info.control_type == "Edit":
+        wrapper.set_edit_text(desired)
+    else:
+        value.SetValue(desired)
+    if value.CurrentValue != desired:
+        raise RuntimeError("text was set but readback differs; inspect the target before retrying")
+    _remember(hwnd, wrapper)
+    _show_interaction(hwnd, rect)
+    return {"action": "replaced" if replace else "appended", "characters": len(text),
+            "automation_id": wrapper.element_info.automation_id, "verified": True,
+            "backend": "pywinauto-uia"}
+
+
 def type_text(text, hwnd=None, name=None, automation_id=None, replace=False):
     if hwnd is None:
         raise ValueError("hwnd is required; background typing never uses the foreground window")
     ensure_input_allowed(hwnd)
     with _lock, background_action(hwnd), uia.com_session():
         wrapper = _find(hwnd, name, automation_id, selected=True, editable=True)
-        _actionable(wrapper)
-        value = uia.pattern(wrapper, "value")
-        if value is None:
-            unsupported("text input without ValuePattern")
-        if value.CurrentIsReadOnly:
-            raise ValueError("target text control is read-only")
-        desired = text if replace else value.CurrentValue + text
-        rect = _interaction_rect(hwnd, wrapper)
-        if wrapper.element_info.control_type == "Edit":
-            wrapper.set_edit_text(desired)
-        else:
-            value.SetValue(desired)
-        if value.CurrentValue != desired:
-            raise RuntimeError("text was set but readback differs; inspect the target before retrying")
-        _remember(hwnd, wrapper)
-        _show_interaction(hwnd, rect)
-        return {"action": "replaced" if replace else "appended", "characters": len(text),
-                "automation_id": wrapper.element_info.automation_id, "verified": True,
-                "backend": "pywinauto-uia"}
+        return _type_into(hwnd, wrapper, text, replace)
 
 
 def read_element(hwnd, name=None, automation_id=None):

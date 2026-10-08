@@ -26,10 +26,13 @@ Verified on 2026-10-08 in `feat/pywinauto-backend`.
   its interior; placement prefers above, with exterior fallback positions.
 - Successful interactions automatically outline the resolved control in red;
   the latest box replaces prior boxes and keeps the feature label.
+- Added `control_set` for one control's click/type/capture steps. Inspection
+  advertises `control_steps`; sets validate capabilities before mutation, bind
+  the original runtime ID, verify text, and return only the current control crop.
 
 ## Evidence
 
-The current suite contains 33 tests: 25 UIA tests, seven native outline tests
+The current suite contains 40 tests: 32 UIA tests, seven native outline tests
 and one real MCP stdio test.
 Live controls verify button handler invocation, Thai/emoji/literal text,
 checkbox state, slider readback and list scrolling while a separate owned
@@ -54,11 +57,17 @@ scroll containers, script steps, unchanged markers on reads/refusals, and
 label-preserving restoration after release. A failed cosmetic observer does
 not report a completed invocation as failed or cause a second invocation.
 
+Control-set tests verify Thai/literal text and append/replace under a covering
+window, native textbox-frame crop pixels and dimensions, crop-only seen state,
+prevalidation, wrong-type/read-only/ambiguous refusals, same-selector native
+control replacement, fresh bounds after movement, capture/layout failures after
+successful writes, per-step journals and MCP worker image serialization.
+
 Other cases cover duplicate selectors, disabled/read-only/canvas refusals,
 incomplete-tree refusal, unsupported gestures, batch prevalidation/runtime stop, synthetic UIPI
 refusal, stale images, snapshot/diff/journal replay, unavailable covered
 capture, MTA MCP worker calls and STA host threads. Stdio transport verifies
-initialization, 34 tools, passive keyboard status and unattached-write errors
+initialization, 35 tools including control_set, passive keyboard status and unattached-write errors
 from a temporary working directory.
 
 Dependencies verified: Python 3.12.10, pywinauto 0.6.9, MCP 2.0.0. `pip check`
