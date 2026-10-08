@@ -4,24 +4,30 @@
 
 Windows, Python 3.10+ and a desktop session containing the target app.
 This migration was tested with Python 3.12.10, pywinauto 0.6.9 and MCP 2.0.0.
-Install dependencies into the repository's venv:
+Install the complete bundle for the selected AI client:
 
 ```powershell
 cd F:\tools\winauto-mcp
-py -3 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
-.\.venv\Scripts\python.exe -m pip check
+.\install.ps1 -Client codex
+# Or: .\install.ps1 -Client claude-code / -Client both
 ```
 
 `uiautomation` is no longer required. An existing venv may still contain it;
 production code does not import it. The installed `pywinauto` uses its UIA
 backend, never its physical input helpers.
 
-## MCP client launch configuration
+The installer prepares the venv/dependencies, probes the real server, installs
+declared required plugins, and registers a native plugin containing the complete
+skill and enabled stdio MCP connection. See
+[installation and repair](docs/skill-installation.md). Use `-IncludeHeap` when
+the requested feature set needs .NET heap tooling.
+
+## MCP launch configuration reference
 
 Use stdio and absolute paths, so the client working directory is irrelevant.
-The examples below preserve the repository's existing client configuration
-formats. They are templates, not a statement that any client is configured.
+The templates below explain the launch contract for custom clients and diagnosis.
+For a supported-client installation, use install.ps1 so skill and connection
+are installed together; config snippets alone are not a complete install.
 
 ### Codex
 
@@ -49,9 +55,11 @@ Example `.vscode/mcp.json`:
 }
 ```
 
-### Claude Desktop
+### Claude Desktop (MCP-only reference)
 
-Merge the server entry into `%APPDATA%\Claude\claude_desktop_config.json`:
+This illustrates `%APPDATA%\Claude\claude_desktop_config.json`. Claude Desktop
+skill provisioning differs from Claude Code; this is not a supported
+complete-bundle installation path:
 
 ```json
 {
@@ -65,19 +73,28 @@ Merge the server entry into `%APPDATA%\Claude\claude_desktop_config.json`:
 ```
 
 Restart/reconnect the client's MCP session after changing server source or
-configuration, then confirm its tool list includes `read_element` and
-`set_value`. This migration does not modify any installed client configuration.
+configuration, then confirm it exposes 34 tools, including `read_element`,
+`set_value` and `control_set`. Check tool names as well as the count: an older
+process may expose a different tool set after files have changed. The installer
+registers selected clients through their native plugin CLI and backs up settings;
+the examples above do not imply configuration has been applied.
+
+## Bundled agent skill
+
+The [WinAuto MCP skill](docs/skill-installation.md) is part of every supported
+installation, alongside server and connection. Its references cover all tools.
 
 ## Verify locally
 
 ```powershell
 .\.venv\Scripts\python.exe tests\smoke.py
-.\.venv\Scripts\python.exe -m compileall -q server.py input_sim.py uia_inspect.py window_manager.py screenshot.py integrity.py journal.py overlay.py heap.py location_cache.py tests
+.\.venv\Scripts\python.exe -m compileall -q server.py control_sets.py input_sim.py uia_inspect.py window_manager.py screenshot.py integrity.py journal.py overlay.py heap.py location_cache.py tests
 ```
 
 The smoke entry point runs the UIA and real stdio transport tests. It creates
-only owned, non-activating windows and cleans them up. It does not launch a
-user app or replay historical probes from `tests/legacy`.
+only owned windows shown without activation and cleans them up. The UIA target
+is normally activatable so provider activation can be detected. The suite does
+not launch a user app or replay historical probes from `tests/legacy`.
 
 Attach to your chosen application using `list_windows`, inspect `get_elements`,
 and verify a supported command with `read_element` before relying on it.

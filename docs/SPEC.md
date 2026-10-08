@@ -21,14 +21,24 @@ second; automation IDs match exactly. Action selection refuses multiple
 matches. Action traversal refuses a truncated or unreadable tree rather than assuming uniqueness from a partial search. `get_elements` is an inspection list, not
 permission to operate a canvas or unsupported pattern.
 
-## 35 MCP tools
+list_windows excludes minimized, hidden and untitled windows and returns
+hwnd/title/process, plus integrity information for blocked writes, without
+rectangles. UIA element rects and action/crop regions use attached-client
+physical pixels. Each attach resets the logical target, seen
+regions, pixel snapshot and heap labels, and starts a new journal session.
+release_control keeps attachment/state and only hides the decoration.
+
+Integrity refusal compares known target/server levels, unless the server has
+UIAccess. An unknown integrity level does not itself refuse an action.
+
+## 34 MCP tools
 
 | Group | Tools | Contract |
 | --- | --- | --- |
 | Attachment | `list_windows`, `attach_window`, `detach_window` | Background target selection with a green client outline; take_control=True refused |
 | Inspection | `capture_screen`, `screenshot`, `capture_region`, `get_elements`, `read_element` | Client pixels/tree/state; read_element hides password text |
 | UIA actions | `click`, `click_element`, `type_text`, `scroll`, `set_value` | Semantic patterns only; enabled/read-only/integrity checks |
-| Waits/scripts | `wait_for`, `wait_stable`, `run_steps`, `control_set` | Explicit waits; prevalidated batches; control_set binds one control and returns only its crop |
+| Waits/scripts | `wait_for`, `run_steps`, `control_set` | Element presence/fixed wait steps; prevalidated batches; control_set binds one control and returns only its crop |
 | Pixel/cache helpers | `locate_in_region`, `snapshot`, `diff_since_snapshot`, `remember_location`, `recall_location` | Freshness and pixel evidence; cache reverified |
 | Debug/evidence | `highlight`, `release_control`, `history`, `replay_frame` | Explicit visual overlay and journal; replay is downscaled |
 | Heap | `heap_snapshot`, `heap_diff` | .NET gcdump, optional external tool, blocking GC |
@@ -44,7 +54,7 @@ permission to operate a canvas or unsupported pattern.
 | RadioButton/ListItem/TreeItem/TabItem with SelectionItemPattern | Select item |
 | ExpandCollapsePattern | Expand or collapse |
 | Edit/Document with ValuePattern | Logical text target; no real focus |
-| ValuePattern | Set literal text, read back; append-at-end default or replace |
+| Edit/Document/ComboBox with ValuePattern | Standalone type_text writes literal text and verifies readback; append-at-end default or replace |
 | RangeValuePattern | Set finite in-range numeric value, read back |
 | ScrollPattern | Vertical small steps; search pointed element then ancestors |
 
@@ -62,7 +72,12 @@ up to 20 steps: `click`, `type` (string `text`, optional boolean `replace`),
 and one required final `capture`. Unknown fields, per-step selectors/coordinates,
 unsupported capabilities, invalid delays and type mismatches reject the set
 before mutation. `get_elements` exposes each control's available `control_steps`;
-Edit/Document controls with writable ValuePattern support all three steps.
+Enabled Edit/Document controls with writable ValuePattern support all three steps.
+Enabled read-only Edit/Document controls support click/capture. Other enabled
+controls exposing Invoke/Toggle/SelectionItem/ExpandCollapsePattern support
+click/capture; remaining controls advertise capture only. These are UIA step
+capabilities, not a guarantee that pixels can be captured. control_set type does
+not support ComboBox even when standalone type_text can write its ValuePattern.
 Defaults for text match `type_text`: append, or replace the entire value.
 
 Bind the initial runtime ID and re-resolve it before each step. Never select a
@@ -79,6 +94,10 @@ control's visible rectangle, including its frame. Return region, crop_size and
 coordinate_offset; only this crop counts as seen. Internal journal frames may
 cover the full client area. Runtime failures stop immediately and report completed
 steps without rollback; callers must inspect the report before retrying mutations.
+Preflight failures raise a tool error. Runtime failures return a normal tool
+response whose report has ok=false, completed_steps and stopped_at_step; inspect
+report.ok rather than treating MCP transport success as action success. The crop
+contains app pixels, not the attach/interaction decoration.
 
 ## Compatibility changes
 
@@ -93,6 +112,14 @@ The initial coordinate click in a batch uses the caller's latest relevant
 view. After a script action mutates the UI, later predicted coordinates are
 unguarded. Batch limits are 40 steps/60 seconds of requested waits. The legacy
 `performed` count includes attempted failures; inspect each step's `ok`.
+run_steps prevalidates syntax and unsupported gestures, then checks control
+capabilities/uniqueness at execution. The wait budget sums fixed wait steps and
+excludes action durations and delay_ms. There is no pixel-stability wait tool or
+script action; verify through control state, element presence or fresh captures.
+The run_steps capture step uses a fresh _try_grab or its prior script frame if
+the grab fails; this fallback is not labelled in the returned report. Action
+errors may include a full-window stop image. These differ from control_set's
+fresh-only crop and report-only runtime failures.
 
 ## Capture and diagnostics
 
@@ -104,7 +131,12 @@ when pixel capture is unavailable. A stale guard has no image evidence to
 compare in that case.
 
 Journal sessions are temporary and retain five folders; history keeps 300
-records in memory. Location cache entries are keyed by process name/client
+records in memory; stored arguments/results are truncated. Aggregate batch
+records reflect whether the tool raised, not report.ok; each script:/control:
+record reflects its attempted step. run_steps attempts before/after frames;
+control_set click/type records are text-only and successful capture has an
+after-frame. replay_frame is available only when history lists the chosen frame.
+Location cache entries are keyed by process name/client
 size/label and checked against current pixels. Heap diagnostics and debug
 overlays do not implement input control.
 
@@ -122,7 +154,7 @@ Successful UIA mutations replace debug boxes with one red box for their resolved
 target (the scrollable ancestor for scroll). Edit selection also counts as an
 interaction. Bounds are captured before mutation, so controls destroyed by a
 successful action can still be indicated. Reads and errors do not change the box.
-This applies to individual tools and each run_steps mutation. Cosmetic failures
+This applies to individual tools and each run_steps/control_set mutation. Cosmetic failures
 must not turn a completed UIA mutation into an error. No COM wrappers are retained.
 If a provider has no usable in-client bounds, the previous box is left unchanged.
 Detach, release_control and highlight([]) hide it; reattach or the next successful
@@ -136,5 +168,5 @@ or refusal; other covering windows still cause a refusal.
 exercise real Value/Invoke/Toggle/RangeValue/Scroll patterns under a cover,
 refusals, readback, script/journal behavior, worker COM and STA hosting. Real
 stdio tests initialize the server from a different directory and verify all
-35 tool names. Historical probes in `tests/legacy` are excluded and require
+34 tool names. Historical probes in `tests/legacy` are excluded and require
 the former backend revision.

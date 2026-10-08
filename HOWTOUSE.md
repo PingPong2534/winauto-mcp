@@ -21,6 +21,14 @@ before substring names. An ambiguous selector errors rather than choosing the
 first match. Names and IDs may be combined. IDs are app-provided, not globally
 unique; selection is scoped to the attached window.
 
+`list_windows` lists visible, non-minimized, titled top-level windows as
+hwnd/title/process, with integrity information when writes are blocked.
+It does not return rectangles. Element rectangles, click coordinates and
+screenshot regions use attached-client physical pixels, not desktop coordinates.
+Every attach starts a new journal session and clears the logical text target,
+seen regions, pixel snapshot and in-memory heap labels. release_control only
+hides the decoration and keeps the attachment and other state.
+
 ## Act and verify
 
 Background UIA writes temporarily mark the target WS_EX_NOACTIVATE, then restore
@@ -48,7 +56,8 @@ been shortcut syntax in a keyboard sender. The default appends at the end of
 the entire value, independent of the user's caret. `replace=True` sets the
 whole value. Selecting an edit by `click_element`/`click` remembers that field
 without focusing it; a later unqualified `type_text` uses that logical target.
-With no logical target it only works if exactly one editable control matches.
+With no logical target it only works if exactly one Edit, Document or ComboBox
+matches; a second read-only/disabled text control still makes it ambiguous.
 Use a selector for each field in a multi-field form. Read-only/disabled controls
 refuse writes; text and numeric writes verify readback. `read_element` omits
 password text.
@@ -66,7 +75,7 @@ small UIA steps per call. Step distance is provider-defined.
 ## One control, multiple steps
 
 Use `control_set` when the next actions belong to one control. Obtain its unique
-selector, control_type and control_steps from `get_elements` first. For a writable
+selector, control_type and control_steps from `get_elements` first. For an enabled, writable
 textbox, send click, type and capture together:
 
 ```python
@@ -88,12 +97,35 @@ Windows focus change is requested. Text defaults to append; use replace=True to
 set the complete value. The set allows up to 20 steps, with one final capture;
 delay_ms (0–3000, default 120) lets the app repaint between steps.
 
+The supported control_steps depend on the actual UIA control:
+
+| Control state | Available steps |
+| --- | --- |
+| Enabled Edit/Document with writable ValuePattern | click, type, capture |
+| Enabled read-only Edit/Document with ValuePattern | click, capture |
+| Enabled control with Invoke/Toggle/SelectionItem/ExpandCollapsePattern | click, capture |
+| Disabled control or no supported activation pattern | capture |
+
+Capture still requires usable bounds and pixels. `actions` lists exposed UIA
+patterns; it does not mean a disabled/read-only control permits every action.
+An editable ComboBox may accept standalone type_text, but control_set currently
+offers type only on Edit/Document. set_value/scroll/wait are not control_set steps;
+use their individual tools or run_steps. capture is required exactly once at the
+end, including for a capture-only set. expected_control_type must match the exact
+returned string, such as EditControl, when supplied.
+
 The response contains a JSON report and one PNG cropped to the textbox's current
 visible rectangle, including its frame, at original resolution. It supplies
 region, crop_size and coordinate_offset; the crop's (0,0) is that offset in the
 attached client area. It does not send a full-window screenshot. On runtime
 failure it returns a report with completed steps and no image; actions are not
-rolled back, so inspect the report before retrying. Covered capture remains
+rolled back, so inspect the report before retrying. Preflight failures are MCP
+tool errors before any step runs. Runtime failures return a report with ok=false,
+completed_steps, stopped_at_step and per-step results; the MCP call itself may
+complete normally, so inspect report.ok. Successful mutations can leave the red
+highlight visible even if the later capture fails. The PNG contains app pixels,
+including the native control border where present, rather than the red/green
+decoration or feature label. Covered capture remains
 dependent on PrintWindow; there is no stale-image or foreground fallback.
 
 ## Unsupported actions
@@ -126,8 +158,11 @@ window overlaps the target, capture errors instead of showing that window.
 Use `get_elements`/`read_element`, or uncover the target manually. The server
 never brings the window forward to repair a screenshot.
 
-`wait_for(name)` waits for an exposed element. `wait_stable` polls pixels until
-a quiet interval; use a region to exclude a blinking caret or animation.
+`wait_for(name)` polls the bounded interactive-element inspection list for an
+exact/substring name. It can report multiple matches; it is a presence check,
+not an actionable unique selector. It raises TimeoutError if none appears.
+Verify completion using read_element, get_elements or a fresh screenshot. There
+is no pixel-stability wait tool or script action.
 Waiting does not count as viewing pixels: capture again before coordinate use.
 `snapshot` and `diff_since_snapshot` report a bounding box around all changed
 pixels, which can include untouched space between changes. Its center is not
@@ -139,26 +174,44 @@ necessarily an actionable point.
 run_steps([
     {"do": "type", "text": "Alice", "automation_id": "nameField", "replace": True},
     {"do": "click_element", "automation_id": "saveButton"},
-    {"do": "wait_stable", "timeout": 3},
     {"do": "check", "expect": "changed", "region": [0, 0, 400, 200]},
     {"do": "capture"}
 ])
 ```
 
 Supported kinds: `click`, `click_element`, `type`, `set_value`, `scroll`, `wait`,
-`wait_stable`, `capture`, `check`. Unsupported gesture/key steps reject the
+`capture`, `check`. Unsupported gesture/key steps reject the
 entire batch before any mutation. Syntax/shape validation occurs first;
-runtime errors stop by default. `stop_on_error=False` records and continues.
+control capabilities, selector uniqueness and read-only/integrity constraints
+are checked at execution, unlike control_set's capability preflight.
+Runtime errors stop by default. `stop_on_error=False` records and continues.
 The `performed` compatibility field counts attempted steps, including failures.
 
 Limits: 40 steps and 60 seconds of requested waits. A coordinate click before
 other mutations is guarded against the caller's prior image; after an action mutates the
-UI, later predicted coordinates are not guarded. Prefer selectors and insert
+UI, later predicted coordinates are not guarded. The guard compares pixels only
+when a prior seen region and current frame are available. Prefer selectors and insert
 `check`/`capture` checkpoints. Check compares against script start or the latest
 capture/check checkpoint, not simply the immediately previous action.
 
-`history` lists outcomes and per-step frames; `replay_frame` returns downscaled
-evidence. Journals live under `%TEMP%\winauto-mcp` and retain five sessions.
+run_steps returns a JSON report followed by zero or more images in the order
+listed in images. Its capture step accepts region=[x1,y1,x2,y2], otherwise it
+returns the full client area. If a fresh grab is unavailable, this step can reuse
+the previous script frame and still report success; its report does not identify
+that fallback. Use control_set, screenshot or capture_region for a fresh capture
+that fails when pixels are unavailable. On an action error run_steps may include
+a full-window stop image, whereas control_set returns no image on failure.
+The 60-second limit covers requested wait steps, not action durations
+or delay_ms; delay_ms defaults to 120 and is clamped to 0–3000 milliseconds.
+
+`history` lists outcomes and available frames; `replay_frame` returns downscaled
+evidence. run_steps attempts before/after frames for each step. control_set logs
+each step as text and keeps an after-frame for successful capture; it does not
+keep click/type before/after frames. Aggregate batch records can have ok=true
+because the tool returned a report; inspect that report and the script:/control:
+step records for failures. Journals live under `%TEMP%\winauto-mcp`, retain five
+session folders and keep the latest 300 records in memory. Arguments/results are
+truncated in the journal; use the returned report for complete step details.
 `highlight` shows red debug rectangles; an empty list hides the overlay.
 `release_control` hides the outline and rectangles while keeping the target attached.
 Reattach or perform a successful interaction to restore the outline and label.

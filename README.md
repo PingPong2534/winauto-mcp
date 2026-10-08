@@ -10,22 +10,31 @@ Requires Windows and Python 3.10+ (verified with Python 3.12.10).
 
 ```powershell
 cd F:\tools\winauto-mcp
-py -3 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
-.\.venv\Scripts\python.exe server.py
+.\install.ps1 -Client codex
+# Or: .\install.ps1 -Client claude-code / -Client both
 ```
 
-The server uses MCP stdio. A client launches it with the absolute path to the
-venv's `python.exe` and `server.py`; see [SETUP.md](SETUP.md). The backend is
+Installation prepares Python, installs the skill, registers/enables a native
+plugin's MCP connection and installs declared required plugins. See
+[SETUP.md](SETUP.md) and [bundle installation](docs/skill-installation.md).
+The server uses MCP stdio with absolute paths to the venv's `python.exe` and
+`server.py`. The backend is
 `pywinauto>=0.6.9,<0.7`, with MCP SDK 2.x.
+
+For agents using this MCP, the repository includes the
+[WinAuto MCP skill](skills/winauto-mcp/SKILL.md), covering all 34 tools with
+UIA targeting, efficient control sets, capture/cache/diff, journal and heap
+diagnostics, and verified recovery. See
+[skill installation](docs/skill-installation.md) for Codex installation and
+Claude Code. An install request always includes runtime, skill and connection.
 
 ## Background control
 
 1. `list_windows()` and `attach_window(hwnd)` select the target and show a green
    client-area outline without raising the target or taking focus. The outline
    passes mouse input through; reattaching clears previous debug highlights.
-2. `get_elements()` lists names, automation IDs, client rectangles and supported actions.
-3. Prefer `click_element(automation_id="...")`, `type_text(..., automation_id="...", replace=True)` and `set_value(...)`.
+2. `get_elements()` lists names, automation IDs, client rectangles, exposed UIA actions and available `control_steps`.
+3. Use `control_set(...)` for one control's click/type/capture sequence; use `click_element(...)`, `type_text(...)` and `set_value(...)` for individual actions.
 4. `read_element(...)` reads text, toggle/selection state and numeric values to verify results.
 
 ```python
@@ -37,8 +46,9 @@ read_element(automation_id="customerName")
 click_element(automation_id="saveButton")
 ```
 
-For one textbox, `control_set` binds the control once, performs its supported
-steps and returns only its cropped frame. `get_elements` exposes `control_steps`.
+For one enabled, writable textbox, `control_set` binds the control once, performs
+its supported steps and returns a JSON report plus one cropped PNG.
+Use selectors and the exact `control_type` obtained from `get_elements`.
 
 ```python
 control_set(automation_id="customerName", expected_control_type="EditControl", steps=[
@@ -51,7 +61,9 @@ control_set(automation_id="customerName", expected_control_type="EditControl", s
 All steps are validated before mutation; each uses the original control's runtime
 ID. The final image includes only the control's visible rectangle and supplies
 its client-coordinate offset. Runtime errors report completed steps and return
-no image. See [HOWTOUSE.md](HOWTOUSE.md#one-control-multiple-steps) for limits.
+no image. Preflight validation failures raise a tool error before any action.
+Inspect the report's `ok` and `completed_steps` before retrying a runtime failure.
+See [HOWTOUSE.md](HOWTOUSE.md#one-control-multiple-steps) for limits.
 
 `click(x,y)` searches the attached window's own UIA tree, including when a
 separate window covers it. It activates the supported control enclosing that
@@ -75,12 +87,13 @@ window switch. Custom providers and newly opened popups may still activate.
 `attach_window(hwnd, label="...")` displays a Unicode feature label outside,
 above the green outline. It moves below or beside the frame when needed and
 hides if no exterior screen space is available. Omit it or pass an empty string
-for no label. Labels are
-single-line, at most 120 characters; long text is ellipsized to fit the window.
+for no label. Labels are single-line, at most 120 characters; long text is
+ellipsized to fit the window.
 The label is visual only and is also included in the journal session name.
 
 Successful clicks, text writes, numeric writes and scrolls automatically show a
-red rectangle around the last control acted on, including `run_steps` actions.
+red rectangle around the last control acted on, including `run_steps` and
+`control_set` actions.
 Each interaction replaces the previous rectangle and keeps the feature label.
 Reads and refused/failed actions leave it unchanged. The rectangle is a snapshot
 of the control's bounds at the interaction, not a live UIA tracker after layout changes.
@@ -99,20 +112,27 @@ of the control's bounds at the interaction, not a live UIA tracker after layout 
   successful interaction to show it again.
 - Canvas controls without UIA action patterns cannot be controlled. Screenshots
   and pixel inspection remain available where the app supports capture.
-- Higher-integrity writes are refused before action. Reads depend on the app's
-  provider and Windows permissions. A minimized or non-responsive app may not
-  provide usable UIA elements or screenshots.
+- Writes to a known higher-integrity target are refused before action when the
+  server has no UIAccess. Unknown levels do not themselves block a write. Reads
+  depend on the app's provider and Windows permissions. A minimized or
+  non-responsive app may not provide usable UIA elements or screenshots.
 - Screenshot capture uses PrintWindow first. If it fails and the target is
   covered, capture refuses to return another app's pixels; it never raises the
   target. UIA reads/actions can still be used independently of capture.
 
 ## Other tools
 
-The 35 tools also include cropped screenshots, pixel location/cache helpers,
-explicit redraw waits, snapshots/diffs, scripted steps, journal replay,
+The 34 tools also include cropped screenshots, pixel location/cache helpers,
+element-presence waits, snapshots/diffs, scripted steps, journal replay,
 debug highlights and .NET heap snapshots. See [HOWTOUSE.md](HOWTOUSE.md) and
 [docs/SPEC.md](docs/SPEC.md) for contracts. Heap tools need `dotnet-gcdump` and
 force a blocking GC; they are not part of UIA control.
+
+`run_steps` is a multi-control script with syntax prevalidation; control-specific
+capabilities are checked as each action runs. Its capture step may reuse the
+previous script frame if a new capture fails. Use `control_set`, `screenshot`
+or `capture_region` when a fresh image is required. Verify each action through
+control readback, an exposed element or a fresh screenshot.
 
 ## Verification
 
@@ -131,23 +151,8 @@ Historical SendInput probes and the retired input guard are in
 [tests/legacy](tests/legacy/README.md), excluded from current discovery.
 See [docs/STATUS.md](docs/STATUS.md) for the verified migration scope.
 
-## Agent usage notes for ZiiDMS desktop testing
+## App-specific testing
 
-
-When using this MCP from Codex/LLM sessions for ZiiDMS desktop UI testing, follow this sequence:
-
-1. Verify the MCP is actually exposed in the active session before falling back to ad-hoc Python calls. Search or inspect available tools for a namespace like `mcp__winauto`. A local clone of this repo is not enough by itself; the client session must be restarted or configured so the MCP server is registered.
-2. Start with `list_windows`. If the target app is missing, launch the app first, wait for the top-level window, then run `list_windows` again. Do not infer failure from `Get-Process.MainWindowHandle = 0` alone; a visible attachable window may still appear in `list_windows`.
-3. Attach by HWND with `attach_window`, then immediately call `capture_screen`. Use the full returned image and UIA summary as the test baseline. Do not rely on cropped screenshots from a chat transcript to decide whether buttons are missing.
-4. Prefer `click_element(name)` for named buttons such as `Save`, `Delete Selected`, `Restore Selected`, `New Department`, and `Include Deleted`. For grid rows, use a unique UIA selector when available. Coordinates from a full client-area image or `locate_in_region` only work when the point resolves to a supported UIA control. Custom-drawn cells without UIA patterns are unsupported; do not fall back to physical input or eyeball resized crops.
-5. For ZiiDMS launched through DmsEnv, the normal launcher may start through a hidden wrapper. If `list_windows` does not show `ZiiDMSNextGen Local`, cleanly stop the prior client PID and relaunch through the approved launcher path. If a temporary visible-wrapper workaround is used, restore the launcher file immediately after launch.
-6. Use `capture_screen` or `get_elements` after each action to verify command enabled/disabled state from UIA, especially for `Save`, `Delete Selected`, and `Restore Selected`. For visual-only state such as selected rows or deleted-row styling, use the full screenshot.
-7. If a click unexpectedly opens a discard/confirmation prompt, record that as behavior evidence before dismissing it. In ZiiDMS Departments testing, read-only/protected fields should not mark the detail dirty merely because typing was attempted.
-
-For the local ZiiDMS NextGen DMSEnv Departments screen, the common launch target is:
-
-```powershell
-& 'C:\Users\Ping\.dmsenv\repos\eziidms-nextgen-dmsenv-a59a578e\run-client.ps1' -BypassLogin -ApiServer 'https://localhost:7160' -OrganizationId 7000 -DealershipId 7001 -Screen DepartmentsView
-```
-
-After launch, attach to the `ZiiDMSNextGen Local` window from `list_windows` and capture the full client area before testing.
+Load [docs/ziidms-testing.md](docs/ziidms-testing.md) only when testing ZiiDMS
+Departments through DmsEnv. Its launcher path and app behavior are environment
+notes, separate from the server's verified UIA contract.

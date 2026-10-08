@@ -29,11 +29,17 @@ Verified on 2026-10-08 in `feat/pywinauto-backend`.
 - Added `control_set` for one control's click/type/capture steps. Inspection
   advertises `control_steps`; sets validate capabilities before mutation, bind
   the original runtime ID, verify text, and return only the current control crop.
+- Removed the pixel-stability wait tool, script action and polling implementation.
+  Verification uses control readback, exposed element state or fresh captures.
+- Added a complete-bundle installer for Codex and Claude Code: Python dependencies,
+  native plugin with the full skill and MCP connection, declared plugin dependencies,
+  copied-file verification and real stdio checks before/after registration.
 
 ## Evidence
 
-The current suite contains 40 tests: 32 UIA tests, seven native outline tests
-and one real MCP stdio test.
+The UIA/outline/transport suite contains 40 tests: 32 UIA tests, seven native
+outline tests and one real MCP stdio test. Six installer regression tests additionally
+exercise native clients and partial failures in isolated temporary client homes.
 Live controls verify button handler invocation, Thai/emoji/literal text,
 checkbox state, slider readback and list scrolling while a separate owned
 window covers the target. Forbidden physical-input/focus methods are trapped;
@@ -67,11 +73,22 @@ Other cases cover duplicate selectors, disabled/read-only/canvas refusals,
 incomplete-tree refusal, unsupported gestures, batch prevalidation/runtime stop, synthetic UIPI
 refusal, stale images, snapshot/diff/journal replay, unavailable covered
 capture, MTA MCP worker calls and STA host threads. Stdio transport verifies
-initialization, 35 tools including control_set, passive keyboard status and unattached-write errors
+initialization, 34 tools including control_set, absence of the retired wait tool,
+passive keyboard status and unattached-write errors
 from a temporary working directory.
 
 Dependencies verified: Python 3.12.10, pywinauto 0.6.9, MCP 2.0.0. `pip check`
 reports no broken requirements. Test journals are isolated temporary folders.
+
+Installer evidence: native Codex and Claude Code (2.1.168) plugin CLIs installed
+the complete skill/MCP bundle and a previously absent local prerequisite plugin.
+Reinstallation updated both native skill caches after source changes, kept one
+plugin ID, preserved unrelated settings and verified each installed connector's
+34-tool stdio handshake. The PowerShell entry point also completed with existing
+Python/venv dependencies. Required-plugin failure blocks main registration;
+preflight failure clears a previous success report.
+Relocated checkouts receive a new connector/cache revision, and a foreign local
+marketplace using the same name is refused without changing its registration.
 
 ## Limits of this verification
 
@@ -81,10 +98,24 @@ UIPI refusal is exercised with a mocked integrity boundary, not by elevating
 an application. Application providers may change focus or show popups on
 semantic invocation. Optional .NET heap collection was not exercised in this
 migration. Historical Notepad/input-hook probes were not executed.
+Fresh-machine WinGet Python/.NET provisioning and heap-tool installation were
+not exercised. Claude Desktop/Cowork/cloud full-bundle installation is outside
+the current installer; native-client tests do not prove post-restart UI discovery.
 The activation guard covers only the attached HWND during mutations, not new
 popup windows or arbitrary providers that explicitly force activation. A person
 clicking that background target during a mutation will not activate it until
 the guard is removed. No foreground-restoration loop is installed.
+
+## Documentation review
+
+Reviewed against source commit 53ef7ca plus removal of the pixel-stability wait
+on 2026-10-08. The server's list_tools output contains the same 34 tools listed
+in SPEC; Python examples were checked against their current signatures.
+Controlled in-memory probes confirm that run_steps can reuse a prior frame when
+capture fails. HOWTOUSE and
+SPEC now describe these limits, batch error/report distinctions, journal frame
+availability, control_steps and coordinate/state conventions. ZiiDMS launcher
+notes are separate and remain outside the native-control verification scope.
 
 ## Reproduce
 

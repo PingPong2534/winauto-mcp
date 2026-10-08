@@ -25,7 +25,8 @@ class TransportTests(unittest.TestCase):
                     self.assertEqual(info.server_info.name, "winauto-mcp")
                     listing = await session.list_tools()
                     names = {tool.name for tool in listing.tools}
-                    self.assertEqual(len(names), 35)
+                    self.assertEqual(len(names), 34)
+                    self.assertNotIn("wait_stable", names)
                     self.assertTrue({"read_element", "set_value", "run_steps", "control_set"} <= names)
                     control = next(tool for tool in listing.tools if tool.name == "control_set")
                     self.assertEqual(control.input_schema["properties"]["steps"]["type"], "array")

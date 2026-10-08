@@ -87,9 +87,10 @@ mcp = MCPServer(
         "For coordinates, take a fresh screenshot or locate_in_region and "
         "respect stale-target refusals. A screenshot crop has an offset and "
         "may be resized; do not eyeball its coordinates. run_steps validates "
-        "all actions first and journals each step. Only an initial coordinate "
+        "step syntax first and journals each step; control capabilities are "
+        "checked during execution. Only an initial coordinate "
         "click before other mutations has a stale check, so keep scripts short and use check steps. "
-        "wait_stable is explicit; take a fresh screenshot afterwards. "
+        "Use get_elements/read_element or a fresh screenshot to verify an action. "
         "history and replay_frame provide evidence; replay images are "
         "downscaled and must not be used for aiming. Reading an elevated "
         "window is allowed, but writes to higher-integrity targets are refused."
@@ -181,7 +182,7 @@ def _mark_seen(frame, rect=None) -> None:
     defaulting to the whole frame.
 
     Only views that informed the caller's next decision count -- a capture
-    taken purely for internal bookkeeping (a settle poll, a journal thumbnail)
+    taken purely for internal bookkeeping (a journal thumbnail or checkpoint)
     must NOT be marked, or the staleness check silently starts approving
     clicks aimed from a screen nobody looked at.
 
@@ -319,7 +320,8 @@ def _stale_block(x: int, y: int, what: str):
         "check whether your target is still there and still at these coordinates. Re-issue the "
         "action (it will go through now that you have looked), or re-locate the target with "
         "locate_in_region. If the app repaints this area continuously and the change is "
-        "irrelevant, pass force=true. If it is still loading, wait_stable() first."
+        "irrelevant, pass force=true. If it is still loading, inspect get_elements "
+        "or wait_for the expected element, then take a fresh screenshot."
     )
 
 
@@ -653,94 +655,6 @@ def wait_for(name: str, timeout: float = 10.0, interval: float = 0.5) -> str:
 
 
 @tool
-def wait_stable(
-    timeout: float = 5.0,
-    settle_ms: int = 400,
-    interval: float = 0.12,
-    threshold: int = 10,
-    region: list[int] | None = None,
-) -> str:
-    """Wait until the attached window stops changing -- i.e. until it has
-    finished drawing whatever it was drawing.
-
-    Actions here can return before the app finishes redrawing, which is well
-    before a menu has opened, a dialog has appeared or a document has
-    rendered. Call this after an action that triggers a slow redraw, then
-    take a fresh screenshot before deciding where to click next. Unlike
-    wait_for(name) this needs no UI Automation tree, so it works on
-    canvas-drawn apps (games, Blender, Godot) where the element list is empty.
-
-    Settles when `settle_ms` passes with no pixel changing by more than
-    `threshold`; gives up at `timeout` seconds. Returns JSON with `stable`
-    (did it settle), `waited_ms`, and, when it did not settle, the
-    `last_change_bbox` of what is still moving.
-
-    An app that repaints part of itself forever -- a blinking caret, a live
-    viewport, a clock -- will never settle window-wide. Pass `region`
-    [x1,y1,x2,y2] to watch only the part you care about, using the
-    `last_change_bbox` from a failed attempt to see what to exclude.
-
-    This does NOT count as looking at the screen: it reports timing, not
-    pixels, so a click aimed from a screenshot taken before this call is
-    still working from a stale view and click() will say so. Take a fresh
-    screenshot() or locate_in_region() after this returns.
-    """
-    hwnd = _require_attached()
-    return json.dumps(_settle(hwnd, timeout, settle_ms, interval, threshold, region))
-
-
-def _settle(hwnd, timeout=5.0, settle_ms=400, interval=0.12, threshold=10, region=None) -> dict:
-    """The polling loop behind wait_stable(), shared with run_steps'
-    {"do":"wait_stable"} step so a script waits exactly the way the tool does."""
-    if timeout <= 0:
-        raise ValueError("timeout must be > 0")
-    watched = tuple(region) if region else None
-    if watched is not None and (len(watched) != 4 or watched[2] <= watched[0] or watched[3] <= watched[1]):
-        raise ValueError("region must be [x1,y1,x2,y2] with x2>x1 and y2>y1")
-
-    started = time.monotonic()
-    deadline = started + timeout
-    previous = grab_window(hwnd)
-    steady_since = time.monotonic()
-    polls, changes, last_change = 1, 0, None
-
-    while True:
-        time.sleep(interval)
-        current = grab_window(hwnd)
-        polls += 1
-        box = changed_bbox(previous, current, threshold=threshold, region=watched)
-        now = time.monotonic()
-        previous = current
-        if box is None:
-            if (now - steady_since) * 1000 >= settle_ms:
-                journal_frame(to_png(current))
-                return {
-                    "stable": True,
-                    "waited_ms": round((now - started) * 1000),
-                    "polls": polls,
-                    "changed_during_wait": changes > 0,
-                }
-        else:
-            steady_since = now
-            changes += 1
-            last_change = list(box)
-        if now >= deadline:
-            journal_frame(to_png(current))
-            return {
-                "stable": False,
-                "waited_ms": round((now - started) * 1000),
-                "polls": polls,
-                "last_change_bbox": last_change,
-                "hint": (
-                    "still repainting at timeout -- if that bbox is a region that "
-                    "animates on its own (caret, viewport, clock), re-run with "
-                    "region=[...] around the part you actually care about, or raise "
-                    "threshold; otherwise the app is still busy, so raise timeout"
-                ),
-            }
-
-
-@tool
 def type_text(text: str, name: str | None = None,
               automation_id: str | None = None, replace: bool = False) -> str:
     """Write literal Unicode through ValuePattern, with verified readback.
@@ -788,7 +702,6 @@ _STEP_KINDS = {
     "click_element": (),
     "set_value": ("value",),
     "wait": ("ms",),
-    "wait_stable": (),
     "capture": (),
     "check": (),
 }
@@ -838,7 +751,7 @@ def _validate_steps(steps):
             raise ValueError(f"step {i}: button must be 'left' or 'right'")
         if kind == "check" and step.get("expect", "changed") not in ("changed", "unchanged"):
             raise ValueError(f"step {i}: expect must be 'changed' or 'unchanged'")
-        for field in ("x", "y", "clicks", "ms", "settle_ms", "threshold"):
+        for field in ("x", "y", "clicks", "ms", "threshold"):
             if field in step and (isinstance(step[field], bool) or not isinstance(step[field], int)):
                 raise ValueError(f"step {i}: {field} must be an integer")
         if kind == "scroll" and not -100 <= step["clicks"] <= 100:
@@ -857,12 +770,6 @@ def _validate_steps(steps):
             if step["ms"] < 0:
                 raise ValueError(f"step {i}: ms must be >= 0")
             waited += int(step["ms"])
-        if kind == "wait_stable":
-            timeout = step.get("timeout", 5.0)
-            if (isinstance(timeout, bool) or not isinstance(timeout, (int, float))
-                    or not math.isfinite(timeout) or timeout <= 0):
-                raise ValueError(f"step {i}: timeout must be a finite number > 0")
-            waited += int(timeout * 1000)
     if waited > MAX_SCRIPT_WAIT_MS:
         raise ValueError(
             f"the script asks to wait {waited}ms in total, over the {MAX_SCRIPT_WAIT_MS}ms limit "
@@ -883,8 +790,9 @@ def _clamp_region(frame, region):
 @tool
 def run_steps(steps: list[dict], delay_ms: int = 120, stop_on_error: bool = True,
               stop_if_user_types: bool = False):
-    """Run up to 40 UIA actions, validating all steps before any action.
-    Kinds: click, click_element, type, set_value, scroll, wait, wait_stable,
+    """Run up to 40 UIA actions, validating step syntax before any action.
+    Control capabilities and selector uniqueness are checked during execution.
+    Kinds: click, click_element, type, set_value, scroll, wait,
     capture, check. type and click_element accept name/automation_id; type
     accepts replace. Unsupported gestures/key steps reject the whole script.
     An initial coordinate click before other mutations is stale-guarded. Each executed step is
@@ -954,14 +862,6 @@ def run_steps(steps: list[dict], delay_ms: int = 120, stop_on_error: bool = True
             elif kind == "wait":
                 time.sleep(max(0, min(int(step["ms"]), MAX_SCRIPT_WAIT_MS)) / 1000)
                 entry["result"] = f"waited {step['ms']}ms"
-            elif kind == "wait_stable":
-                entry["result"] = _settle(
-                    hwnd,
-                    timeout=float(step.get("timeout", 5.0)),
-                    settle_ms=int(step.get("settle_ms", 400)),
-                    threshold=int(step.get("threshold", 10)),
-                    region=step.get("region"),
-                )
             elif kind == "capture":
                 shot = _try_grab() or frame
                 if shot is None:

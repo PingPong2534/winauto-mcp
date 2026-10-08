@@ -506,7 +506,7 @@ class BackgroundTests(unittest.TestCase):
                     {"do": "click", "x": "bad", "y": 10},
                     {"do": "type", "text": "bad", "name": " "},
                     {"do": "set_value", "value": float("nan"), "automation_id": "301"},
-                    {"do": "wait_stable", "timeout": -1},
+                    {"do": "wait_stable"},
                     {"do": "check", "region": [0, 1]}]:
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 server.run_steps([{"do": "type", "text": "bad", "automation_id": "101"}, bad])
