@@ -1,4 +1,4 @@
-"""Live UIA/MCP regression tests using only owned, non-activating windows."""
+"""Live UIA/MCP regression tests using owned windows shown without activation."""
 
 import asyncio
 import contextlib
@@ -36,7 +36,7 @@ def last_input_tick():
 
 
 class TestWindow:
-    """Native controls with a message pump; never activate or move the cursor."""
+    """Normally activatable controls shown without activation or cursor movement."""
 
     def __init__(self):
         self.ready = threading.Event()
@@ -72,7 +72,7 @@ class TestWindow:
             wc.hbrBackground = win32con.COLOR_WINDOW + 1
             win32gui.RegisterClass(wc)
             self.hwnd = win32gui.CreateWindowEx(
-                win32con.WS_EX_NOACTIVATE, cls, "winauto UIA owned test window",
+                0, cls, "winauto UIA owned test window",
                 win32con.WS_OVERLAPPEDWINDOW, 200, 200, 740, 560, 0, 0, 0, None,
             )
             controls = [
@@ -173,12 +173,42 @@ class BackgroundTests(unittest.TestCase):
         self.assertEqual(win32gui.GetForegroundWindow(), self.desktop[1])
         if last_input_tick() == self.last_input:
             self.assertEqual(win32api.GetCursorPos(), self.desktop[0])
+        self.assertFalse(win32gui.GetWindowLong(self.window.hwnd, win32con.GWL_EXSTYLE)
+                         & win32con.WS_EX_NOACTIVATE, "mutation leaked the activation guard")
         # Physical input can occur while this test runs. Never pin or restore
         # a person's cursor to force an assertion; forbidden input/focus paths
         # above are trapped even if a physical move occurs.
 
     def text(self):
         return win32gui.GetWindowText(self.window.controls[101])
+
+    def test_background_guard_restores_owned_bit_after_failure(self):
+        hwnd = self.window.hwnd
+        original = win32gui.GetWindowLong(hwnd, win32con.GWL_EXSTYLE)
+        try:
+            with self.assertRaisesRegex(RuntimeError, "provider failed"):
+                with window_manager.background_action(hwnd):
+                    current = win32gui.GetWindowLong(hwnd, win32con.GWL_EXSTYLE)
+                    self.assertTrue(current & win32con.WS_EX_NOACTIVATE)
+                    window_manager._set_ex_style(hwnd, current | win32con.WS_EX_ACCEPTFILES)
+                    raise RuntimeError("provider failed")
+            restored = win32gui.GetWindowLong(hwnd, win32con.GWL_EXSTYLE)
+            self.assertFalse(restored & win32con.WS_EX_NOACTIVATE)
+            self.assertTrue(restored & win32con.WS_EX_ACCEPTFILES)
+            window_manager._set_ex_style(hwnd, original | win32con.WS_EX_NOACTIVATE)
+            with window_manager.background_action(hwnd):
+                pass
+            self.assertTrue(win32gui.GetWindowLong(hwnd, win32con.GWL_EXSTYLE)
+                            & win32con.WS_EX_NOACTIVATE)
+        finally:
+            window_manager._set_ex_style(hwnd, original)
+
+    def test_foreground_target_is_not_restyled(self):
+        with patch.object(win32gui, "GetForegroundWindow", return_value=self.window.hwnd), \
+                patch.object(window_manager, "_set_ex_style",
+                             side_effect=AssertionError("foreground target must not be restyled")):
+            with window_manager.background_action(self.window.hwnd):
+                pass
 
     def test_inspection_scoped_to_covered_target(self):
         elements = json.loads(server.get_elements())

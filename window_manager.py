@@ -1,10 +1,29 @@
 """Enumerate and attach to top-level Windows windows."""
 
+from contextlib import contextmanager
+import ctypes
+
+import win32con
 import win32gui
 import win32process
 import psutil
 
 import integrity
+
+_user32 = ctypes.WinDLL("user32", use_last_error=True)
+_set_window_long = getattr(_user32, "SetWindowLongPtrW", _user32.SetWindowLongW)
+_set_window_long.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_ssize_t]
+_set_window_long.restype = ctypes.c_ssize_t
+
+
+def _set_ex_style(hwnd, style):
+    # ctypes releases the GIL while Windows sends WM_STYLECHANGING/CHANGED.
+    # A same-process target may run a Python window procedure on another thread.
+    ctypes.set_last_error(0)
+    previous = _set_window_long(hwnd, win32con.GWL_EXSTYLE, style)
+    error = ctypes.get_last_error()
+    if not previous and error:
+        raise ctypes.WinError(error)
 
 
 def list_windows():
@@ -100,3 +119,26 @@ def ensure_input_allowed(hwnd):
         raise integrity.InputBlocked(
             integrity.why_blocked(level, get_window_title(hwnd), get_process_name(hwnd))
         )
+
+
+@contextmanager
+def background_action(hwnd):
+    """Suppress target activation during UIA mutations made from another app.
+
+    Win32 UIA providers can activate even when the client uses only patterns.
+    Restore only the style bit we added, including on failure. Never move focus
+    back: the person may have switched windows during the action.
+    """
+    if win32gui.GetForegroundWindow() == hwnd:
+        yield
+        return
+    style = win32gui.GetWindowLong(hwnd, win32con.GWL_EXSTYLE)
+    added = not (style & win32con.WS_EX_NOACTIVATE)
+    if added:
+        _set_ex_style(hwnd, style | win32con.WS_EX_NOACTIVATE)
+    try:
+        yield
+    finally:
+        if added and window_exists(hwnd):
+            current = win32gui.GetWindowLong(hwnd, win32con.GWL_EXSTYLE)
+            _set_ex_style(hwnd, current & ~win32con.WS_EX_NOACTIVATE)

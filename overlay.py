@@ -16,6 +16,7 @@ from window_manager import get_client_rect_screen, window_exists
 
 BORDER_COLOR = "#00FF66"
 HIGHLIGHT_COLOR = "#FF3355"
+LABEL_BG_COLOR = "#153026"
 
 
 def _color(value):
@@ -29,6 +30,7 @@ class Overlay:
         self._cmd_q = queue.Queue()
         self._tracked_hwnd = None
         self._highlights = []
+        self._label = ""
         self._drawn = None
         self._suspended = 0
         self._hwnd = None
@@ -109,6 +111,8 @@ class Overlay:
                     self._hide()
                 elif cmd == "highlights":
                     self._highlights = data
+                elif cmd == "label":
+                    self._label = data
                 elif cmd == "suspend":
                     self._suspended += 1
                     self._hide()
@@ -139,7 +143,7 @@ class Overlay:
         if width <= 0 or height <= 0:
             self._hide()
             return
-        state = (rect, tuple(self._highlights))
+        state = (rect, tuple(self._highlights), self._label)
         if state == self._drawn:
             return
         win32gui.SetWindowPos(
@@ -172,8 +176,41 @@ class Overlay:
                         win32gui.DeleteObject(pen)
             finally:
                 win32gui.SelectObject(dc, brush)
+            if self._drawn[2]:
+                self._paint_label(dc, self._drawn[2], right, bottom)
         finally:
             win32gui.EndPaint(hwnd, paint)
+
+    def _paint_label(self, dc, label, width, height):
+        dpi = ctypes.windll.user32.GetDpiForWindow(ctypes.c_void_p(self.hwnd)) or 96
+        spec = win32gui.LOGFONT()
+        spec.lfFaceName = "Segoe UI"
+        spec.lfHeight = -round(16 * dpi / 96)
+        font = win32gui.CreateFontIndirect(spec)
+        old_font = win32gui.SelectObject(dc, font)
+        try:
+            text_width, text_height = win32gui.GetTextExtentPoint32(dc, label)
+            right = min(width - 8, 8 + text_width + 16)
+            bottom = min(height - 2, text_height + 10)
+            if right <= 16 or bottom <= 4:
+                return
+            bg = win32gui.CreateSolidBrush(_color(LABEL_BG_COLOR))
+            try:
+                win32gui.FillRect(dc, (8, 1, right, bottom), bg)
+            finally:
+                win32gui.DeleteObject(bg)
+            old_color = win32gui.SetTextColor(dc, _color("#FFFFFF"))
+            old_mode = win32gui.SetBkMode(dc, win32con.TRANSPARENT)
+            try:
+                win32gui.DrawText(dc, label, -1, (16, 2, right - 8, bottom - 2),
+                                  win32con.DT_SINGLELINE | win32con.DT_VCENTER
+                                  | win32con.DT_END_ELLIPSIS | win32con.DT_NOPREFIX)
+            finally:
+                win32gui.SetBkMode(dc, old_mode)
+                win32gui.SetTextColor(dc, old_color)
+        finally:
+            win32gui.SelectObject(dc, old_font)
+            win32gui.DeleteObject(font)
 
     # Thread-safe public API.
     def track(self, hwnd):
@@ -185,6 +222,10 @@ class Overlay:
     def set_highlights(self, rects):
         """Rectangles in the target's client-relative pixel space."""
         self._cmd_q.put(("highlights", rects))
+
+    def set_label(self, label):
+        """Set the visible feature label; never change the app's text/focus."""
+        self._cmd_q.put(("label", label))
 
     def stop(self):
         self._cmd_q.put(("stop", None))

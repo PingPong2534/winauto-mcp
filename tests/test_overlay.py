@@ -91,11 +91,11 @@ class OverlayTests(unittest.TestCase):
         server.attach_window(self.window.hwnd)
         server.highlight([[10, 10, 90, 90]])
         self.wait_for(lambda: self.overlay._drawn == (
-            window_manager.get_client_rect_screen(self.window.hwnd), ((10, 10, 90, 90),)))
+            window_manager.get_client_rect_screen(self.window.hwnd), ((10, 10, 90, 90),), ""))
         # Same HWND/geometry must still reset old boxes.
         server.attach_window(self.window.hwnd)
         self.wait_for(lambda: self.overlay._drawn == (
-            window_manager.get_client_rect_screen(self.window.hwnd), ()))
+            window_manager.get_client_rect_screen(self.window.hwnd), (), ""))
         server.attach_window(self.window.cover)
         self.wait_for(lambda: self.shown_on(self.window.cover))
         server.detach_window()
@@ -140,6 +140,42 @@ class OverlayTests(unittest.TestCase):
         self.wait_for(lambda: self.shown_on(target))
         self.wait_for(lambda: self.green_pixels()[1] > 100)
         self.assertEqual(win32gui.GetForegroundWindow(), foreground)
+
+    def test_attach_label_paints_thai_and_clears_without_taking_focus(self):
+        foreground = win32gui.GetForegroundWindow()
+        label = "กำลังทดสอบ: บันทึกข้อมูลลูกค้า & Restore"
+        server.attach_window(self.window.cover, label=label)
+        self.wait_for(lambda: self.shown_on(self.window.cover)
+                      and self.overlay._drawn[2] == label)
+
+        def label_visible():
+            image, _ = self.green_pixels()
+            tab = image.crop((8, 1, image.width - 8, 30))
+            colors = dict((color, n) for n, color in tab.getcolors(tab.width * tab.height))
+            return colors.get((21, 48, 38), 0) > 100 and colors.get((255, 255, 255), 0) > 10
+
+        self.wait_for(label_visible)
+        self.assertIn(label, server.journal.session_info()["label"])
+        self.assertEqual(win32gui.GetForegroundWindow(), foreground)
+        proof = os.environ.get("WINAUTO_LABEL_PROOF")
+        if proof:
+            self.green_pixels()[0].save(proof)
+        server.release_control()
+        self.wait_for(lambda: not self.visible())
+        server.highlight([[40, 40, 80, 80]])
+        self.wait_for(lambda: self.shown_on(self.window.cover)
+                      and self.overlay._drawn[2] == label)
+        self.wait_for(label_visible)
+        server.attach_window(self.window.cover, label="W" * 120)
+        self.wait_for(lambda: self.overlay._drawn[2] == "W" * 120)
+        self.wait_for(label_visible)
+        server.attach_window(self.window.cover)
+        self.wait_for(lambda: self.overlay._drawn[2] == "")
+        self.assertEqual(win32gui.GetForegroundWindow(), foreground)
+        for invalid in ("line\nbreak", "x" * 121, "nul\x00"):
+            with self.subTest(label=invalid), self.assertRaises(ValueError):
+                server.attach_window(self.window.hwnd, label=invalid)
+        self.assertEqual(server._state["hwnd"], self.window.cover)
 
 
 if __name__ == "__main__":

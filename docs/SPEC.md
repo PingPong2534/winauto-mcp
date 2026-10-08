@@ -8,6 +8,12 @@ journal state are shared. Each UIA call initializes/balances COM on its worker
 thread; an existing STA host is respected. COM wrappers do not survive a call;
 only runtime IDs are remembered for a logically selected field.
 
+Each background mutation temporarily sets WS_EX_NOACTIVATE on the target HWND.
+The finally path removes only the bit it added; pre-existing bits and concurrent
+style changes are preserved. A foreground target is not modified. This blocks
+the reproduced standard Win32 provider activation; it does not constrain new
+popups or explicit activation by arbitrary providers. No focus is restored.
+
 UIA queries start at the attached HWND, not at the desktop or foreground
 window. Tree traversal is bounded to depth 15 and 3,000 nodes; element-list
 output is capped at 150. Names match case-insensitive exact first, substring
@@ -78,6 +84,10 @@ overlays do not implement input control.
 
 Attach shows the green outline and clears prior highlights. The overlay has
 WS_EX_NOACTIVATE and WS_EX_TRANSPARENT and does not raise the target.
+The optional attach `label` is a single-line Unicode string, at most 120
+characters, drawn on a contrasting top tab with ellipsis when necessary.
+An empty label removes the tab; a new attach replaces the prior label and
+includes it in the journal session name. It does not select or type into the app.
 Detach, release_control and highlight([]) hide it; reattach shows it again.
 Screen fallback temporarily hides this decoration and restores it after capture
 or refusal; other covering windows still cause a refusal.

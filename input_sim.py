@@ -6,7 +6,7 @@ Coordinates resolve against the attached window's own tree even if covered.
 import math
 import threading
 import uia_inspect as uia
-from window_manager import ensure_input_allowed, get_client_size
+from window_manager import background_action, ensure_input_allowed, get_client_size
 
 _targets = {}
 _lock = threading.RLock()
@@ -150,14 +150,14 @@ def click_in_window(hwnd, client_x, client_y, button="left", double=False,
                     modifiers=None, keep_cursor=False):
     ensure_input_allowed(hwnd)
     _click_options(button, double, modifiers)
-    with _lock, uia.com_session():
+    with _lock, background_action(hwnd), uia.com_session():
         return _activate(hwnd, _at_point(hwnd, client_x, client_y, interactive=True))
 
 
 def click_element(hwnd, name=None, automation_id=None, button="left", double=False):
     ensure_input_allowed(hwnd)
     _click_options(button, double)
-    with _lock, uia.com_session():
+    with _lock, background_action(hwnd), uia.com_session():
         wrapper = _find(hwnd, name, automation_id)
         desc = uia.describe(wrapper, hwnd)
         action = _activate(hwnd, wrapper)
@@ -168,7 +168,7 @@ def type_text(text, hwnd=None, name=None, automation_id=None, replace=False):
     if hwnd is None:
         raise ValueError("hwnd is required; background typing never uses the foreground window")
     ensure_input_allowed(hwnd)
-    with _lock, uia.com_session():
+    with _lock, background_action(hwnd), uia.com_session():
         wrapper = _find(hwnd, name, automation_id, selected=True, editable=True)
         _actionable(wrapper)
         value = uia.pattern(wrapper, "value")
@@ -211,7 +211,7 @@ def read_element(hwnd, name=None, automation_id=None):
 
 def set_value(hwnd, value, name=None, automation_id=None):
     ensure_input_allowed(hwnd)
-    with _lock, uia.com_session():
+    with _lock, background_action(hwnd), uia.com_session():
         wrapper = _find(hwnd, name, automation_id)
         _actionable(wrapper)
         iface = uia.pattern(wrapper, "range_value")
@@ -235,7 +235,7 @@ def scroll_in_window(hwnd, client_x, client_y, clicks, keep_cursor=False):
         raise ValueError("clicks must be an integer between -100 and 100")
     if clicks == 0:
         return "no scroll requested"
-    with _lock, uia.com_session():
+    with _lock, background_action(hwnd), uia.com_session():
         wrapper = _at_point(hwnd, client_x, client_y)
         root_id = uia.runtime_id(uia.root_wrapper(hwnd))
         for _ in range(uia.MAX_DEPTH + 1):

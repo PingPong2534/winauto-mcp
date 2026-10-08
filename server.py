@@ -403,9 +403,12 @@ def list_windows() -> str:
 
 
 @tool
-def attach_window(hwnd: int, take_control: bool = False) -> str:
+def attach_window(hwnd: int, take_control: bool = False, label: str = "") -> str:
     """Choose a background UIA target and show its non-activating green outline.
+    label names the feature under test (single-line Unicode, max 120 characters).
     Never raise the target. take_control=True is unsupported."""
+    if len(label) > 120 or any(char in label for char in "\r\n\x00"):
+        raise ValueError("label must be a single line of at most 120 characters, without NUL")
     if not window_manager.window_exists(hwnd):
         raise ValueError(f"no such window: {hwnd}")
     if take_control:
@@ -414,13 +417,17 @@ def attach_window(hwnd: int, take_control: bool = False) -> str:
     _state.update(hwnd=hwnd, pid=window_manager.get_pid(hwnd),
                   seen=[], heap={}, last_snapshot=None)
     title = window_manager.get_window_title(hwnd)
-    session = journal.start_session(f"{title} (hwnd={hwnd})")
+    session_label = f"{title} (hwnd={hwnd})"
+    if label:
+        session_label = f"[{label}] {session_label}"
+    session = journal.start_session(session_label)
     level = integrity.window_level(hwnd)
     warning = ""
     if integrity.blocks_input(level):
         warning = "\nWARNING: " + integrity.why_blocked(level, title, window_manager.get_process_name(hwnd))
     overlay = get_overlay()
     overlay.set_highlights([])
+    overlay.set_label(label)
     overlay.track(hwnd)
     return (f'attached to "{title}" (hwnd={hwnd}) -- pywinauto UIA; '
             f'green outline enabled; mouse and foreground unchanged; journal session {session}{warning}')

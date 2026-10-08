@@ -30,7 +30,7 @@ venv's `python.exe` and `server.py`; see [SETUP.md](SETUP.md). The backend is
 
 ```python
 # MCP calls shown as Python-style pseudocode; these are not a client library.
-attach_window(hwnd)
+attach_window(hwnd, label="Feature: Departments - Save / Restore")
 get_elements()
 type_text("สวัสดี 😀", automation_id="customerName", replace=True)
 read_element(automation_id="customerName")
@@ -49,6 +49,17 @@ InvokePattern, expandable controls use ExpandCollapsePattern, text uses
 ValuePattern, sliders use RangeValuePattern, and scrolling uses ScrollPattern.
 The application must expose the relevant pattern. Its provider can have its
 own popup or focus behavior; the server does not call focus/input APIs.
+
+For background mutations, the server temporarily adds WS_EX_NOACTIVATE to the
+target and restores that bit afterwards, including on failure. This suppresses
+activation by standard Win32 UIA providers. A target already in the foreground
+is left as it is. No focus-restoration loop runs; it would override a person's
+window switch. Custom providers and newly opened popups may still activate.
+
+`attach_window(hwnd, label="...")` displays a Unicode feature label at the top
+of the green outline. Omit it or pass an empty string for no label. Labels are
+single-line, at most 120 characters; long text is ellipsized to fit the window.
+The label is visual only and is also included in the journal session name.
 
 ## Compatibility and limits
 

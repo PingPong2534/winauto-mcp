@@ -5,6 +5,9 @@
 Call `list_windows`, then `attach_window(hwnd)`. Attaching shows a green
 client-area outline without raising the target or taking focus. The outline
 passes mouse input through and follows the target; reattaching clears old highlights.
+Use `attach_window(hwnd, label="Feature: Save customer")` to name the current
+test on the outline. Labels support Thai, are single-line, and accept at most
+120 characters. Omit the label or pass `""` to clear it on the next attach.
 `take_control=True` is unsupported. `capture_screen` returns the full client
 image plus a UIA summary; `get_elements` returns detailed JSON. Every element
 has `name`, `automation_id`, `control_type`, `enabled`, `rect`, `runtime_id`
@@ -16,6 +19,10 @@ first match. Names and IDs may be combined. IDs are app-provided, not globally
 unique; selection is scoped to the attached window.
 
 ## Act and verify
+
+Background UIA writes temporarily mark the target WS_EX_NOACTIVATE, then restore
+the added bit even on errors. The server never forces the previous window back
+to the foreground. App-created popups/custom providers can still change focus.
 
 ```python
 # Illustrative MCP call sequence, using IDs obtained from get_elements.

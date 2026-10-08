@@ -27,6 +27,8 @@ class TransportTests(unittest.TestCase):
                     names = {tool.name for tool in listing.tools}
                     self.assertEqual(len(names), 34)
                     self.assertTrue({"read_element", "set_value", "run_steps"} <= names)
+                    attach = next(tool for tool in listing.tools if tool.name == "attach_window")
+                    self.assertEqual(attach.input_schema["properties"]["label"]["type"], "string")
                     result = await session.call_tool("keyboard_status", {})
                     self.assertFalse(result.is_error)
                     state = json.loads(next(b.text for b in result.content if b.type == "text"))
