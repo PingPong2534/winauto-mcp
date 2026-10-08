@@ -1,14 +1,13 @@
-"""A transparent, click-through, always-on-top window that outlines the
-currently attached target window and can highlight specific element rects.
+"""A click-through, non-activating Windows outline for the attached client area.
 
-Runs its own Tk instance on a background thread; all state changes go
-through a thread-safe queue so callers never touch Tk objects directly.
+The native window is created with its input styles already set. State updates
+are queued to its dedicated message-pump thread; no caller touches UI objects.
 """
 
+import ctypes
+from contextlib import contextmanager
 import queue
 import threading
-
-import tkinter as tk
 
 import win32con
 import win32gui
@@ -19,94 +18,83 @@ BORDER_COLOR = "#00FF66"
 HIGHLIGHT_COLOR = "#FF3355"
 
 
+def _color(value):
+    red, green, blue = (int(value[i:i + 2], 16) for i in (1, 3, 5))
+    return red | (green << 8) | (blue << 16)
+
+
 class Overlay:
     def __init__(self, poll_ms=150):
         self._poll_ms = poll_ms
         self._cmd_q = queue.Queue()
         self._tracked_hwnd = None
         self._highlights = []
-        # What is currently on screen. The poll loop compares against this and
-        # touches Tk only when it disagrees. Repainting a transparent topmost
-        # window the size of the target every 150ms for the whole session is
-        # enough compositor work to make the tracked app feel like it is
-        # stuttering -- and the outline itself flickers, which reads as the
-        # automation having hung when it is only redrawing.
         self._drawn = None
+        self._suspended = 0
+        self._hwnd = None
+        self._error = None
         self._ready = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
-        self._ready.wait(timeout=3)
-
-    def _run(self):
-        self.root = tk.Tk()
-        self.root.overrideredirect(True)
-        self.root.attributes("-topmost", True)
-        self.root.attributes("-transparentcolor", "black")
-        self.root.config(bg="black")
-        self.canvas = tk.Canvas(self.root, bg="black", highlightthickness=0, bd=0)
-        self.canvas.pack(fill="both", expand=True)
-        self.root.withdraw()
-        # Before the window is ever mapped, so there is no first showing during
-        # which it could take the foreground.
-        self._deny_activation()
-        self._ready.set()
-        self._tick()
-        self.root.mainloop()
-
-    def _deny_activation(self):
-        """Tell Windows this window may never hold the foreground.
-
-        Measured 2026-08-26: showing the outline activated it. After a tool
-        call the foreground window was class `TkTopLevel` -- the outline --
-        instead of the app being driven. An outline is a decoration; if it
-        holds the foreground then keystrokes are aimed at a rectangle, and the
-        window the person was using is never handed back to them.
-
-        The first version of this asked Tk for the handle with `wm_frame()`,
-        and that is the wrong window. Measured 2026-08-26 with the outline
-        visible on screen: the `TkTopLevel` actually being displayed had
-        WS_EX_NOACTIVATE *clear*, while the handle the code had marked was a
-        different window entirely. So the fix was not doing what it claimed,
-        and the diagnostic that covered it passed anyway -- it is timing
-        dependent, and it happened to pass the day it was written.
-
-        What does work, measured the same day: `winfo_id()` walked up with
-        GA_ROOT, called on the Tk thread. While the window is still withdrawn
-        that resolves to handle X, and the window that later appears on screen
-        is also X. So the style can be set before the window is ever mapped,
-        which is what makes it airtight rather than a race -- there is no first
-        showing during which the outline is still allowed the foreground.
-
-        Called again on the show path as a cheap safety net, in case Tk ever
-        recreates the window: it is idempotent, and _redraw only runs when the
-        outline actually needs repainting.
-
-        Read from the Tk thread only. Tk is not thread-safe, and calling
-        wm_frame()/winfo_id() from elsewhere returns a different handle again
-        -- which is how the wrong window got marked in the first place.
-        """
-        try:
-            hwnd = self.root.winfo_id()
-            hwnd = win32gui.GetAncestor(hwnd, win32con.GA_ROOT) or hwnd
-            style = win32gui.GetWindowLong(hwnd, win32con.GWL_EXSTYLE)
-            if not style & win32con.WS_EX_NOACTIVATE:
-                win32gui.SetWindowLong(
-                    hwnd, win32con.GWL_EXSTYLE, style | win32con.WS_EX_NOACTIVATE
-                )
-            self._hwnd = hwnd
-        except Exception:  # noqa: BLE001 - a cosmetic overlay must never fail
-            pass  # keep whatever handle we had; a stale one is better than none
+        if not self._ready.wait(timeout=3):
+            raise RuntimeError("outline window did not start")
+        if self._error:
+            raise RuntimeError("outline window could not start") from self._error
 
     @property
     def hwnd(self):
-        """The outline's own window handle, or None if it could not be found.
+        """The outline's own HWND, for diagnostics and window enumeration."""
+        return self._hwnd
 
-        Exposed so that anything enumerating windows can leave the outline out
-        by name rather than by guessing at a class or excluding this process
-        wholesale -- the outline is the one window of ours that is ever visible,
-        and it is a decoration, not something an app popped up.
-        """
-        return getattr(self, "_hwnd", None)
+    def _run(self):
+        name = f"winauto_overlay_{id(self)}"
+        registered = False
+        try:
+            wc = win32gui.WNDCLASS()
+            wc.lpszClassName = name
+            wc.lpfnWndProc = self._window_proc
+            win32gui.RegisterClass(wc)
+            registered = True
+            self._hwnd = win32gui.CreateWindowEx(
+                win32con.WS_EX_LAYERED | win32con.WS_EX_TRANSPARENT
+                | win32con.WS_EX_NOACTIVATE | win32con.WS_EX_TOPMOST
+                | win32con.WS_EX_TOOLWINDOW,
+                name, "", win32con.WS_POPUP, 0, 0, 1, 1, 0, 0, 0, None,
+            )
+            win32gui.SetLayeredWindowAttributes(self.hwnd, 0, 255, win32con.LWA_COLORKEY)
+            if not ctypes.windll.user32.SetTimer(ctypes.c_void_p(self.hwnd), 1, self._poll_ms, None):
+                raise ctypes.WinError()
+            self._ready.set()
+            win32gui.PumpMessages()
+        except Exception as exc:
+            self._error = exc
+        finally:
+            self._ready.set()
+            if self.hwnd and win32gui.IsWindow(self.hwnd):
+                win32gui.DestroyWindow(self.hwnd)
+            if registered:
+                win32gui.UnregisterClass(name, None)
+
+    def _window_proc(self, hwnd, msg, wp, lp):
+        if msg == win32con.WM_TIMER:
+            self._tick()
+            return 0
+        if msg == win32con.WM_PAINT:
+            self._paint(hwnd)
+            return 0
+        if msg == win32con.WM_ERASEBKGND:
+            return 1
+        if msg == win32con.WM_MOUSEACTIVATE:
+            return win32con.MA_NOACTIVATE
+        if msg == win32con.WM_DESTROY:
+            ctypes.windll.user32.KillTimer(ctypes.c_void_p(hwnd), 1)
+            win32gui.PostQuitMessage(0)
+            return 0
+        return win32gui.DefWindowProc(hwnd, msg, wp, lp)
+
+    def _hide(self):
+        self._drawn = None
+        win32gui.ShowWindow(self.hwnd, win32con.SW_HIDE)
 
     def _tick(self):
         try:
@@ -114,56 +102,80 @@ class Overlay:
                 cmd, data = self._cmd_q.get_nowait()
                 if cmd == "track":
                     self._tracked_hwnd = data
+                    self._drawn = None
                 elif cmd == "untrack":
                     self._tracked_hwnd = None
                     self._highlights = []
-                    self._drawn = None
-                    self.root.withdraw()
+                    self._hide()
                 elif cmd == "highlights":
                     self._highlights = data
+                elif cmd == "suspend":
+                    self._suspended += 1
+                    self._hide()
+                    data.set()
+                elif cmd == "resume":
+                    self._suspended -= 1
                 elif cmd == "stop":
-                    self.root.quit()
+                    win32gui.DestroyWindow(self.hwnd)
                     return
         except queue.Empty:
             pass
 
-        if self._tracked_hwnd is not None:
-            if window_exists(self._tracked_hwnd):
-                try:
-                    rect = get_client_rect_screen(self._tracked_hwnd)
-                    self._redraw(rect)
-                except Exception:
-                    pass
-            else:
+        if self._tracked_hwnd is not None and not self._suspended:
+            if not window_exists(self._tracked_hwnd):
                 self._tracked_hwnd = None
-                self._drawn = None
-                self.root.withdraw()
-
-        self.root.after(self._poll_ms, self._tick)
+                self._hide()
+            elif win32gui.IsIconic(self._tracked_hwnd) or not win32gui.IsWindowVisible(self._tracked_hwnd):
+                self._hide()
+            else:
+                try:
+                    self._redraw(get_client_rect_screen(self._tracked_hwnd))
+                except win32gui.error:
+                    self._hide()
 
     def _redraw(self, rect):
         left, top, right, bottom = rect
         width, height = right - left, bottom - top
         if width <= 0 or height <= 0:
+            self._hide()
             return
-        # Nothing has moved and nothing is highlighted differently, so the
-        # pixels already on screen are correct. Reading the rect is cheap; it
-        # is the drawing that costs, so the poll stays fast and the paint stops.
         state = (rect, tuple(self._highlights))
         if state == self._drawn:
             return
+        win32gui.SetWindowPos(
+            self.hwnd, win32con.HWND_TOPMOST, left, top, width, height,
+            win32con.SWP_NOACTIVATE | win32con.SWP_SHOWWINDOW,
+        )
         self._drawn = state
-        self.root.deiconify()
-        self._deny_activation()
-        self.root.geometry(f"{width}x{height}+{left}+{top}")
-        self.canvas.config(width=width, height=height)
-        self.canvas.delete("all")
-        self.canvas.create_rectangle(1, 1, width - 1, height - 1, outline=BORDER_COLOR, width=3)
-        for hx1, hy1, hx2, hy2 in self._highlights:
-            self.canvas.create_rectangle(hx1, hy1, hx2, hy2, outline=HIGHLIGHT_COLOR, width=2)
+        win32gui.InvalidateRect(self.hwnd, None, False)
+        win32gui.UpdateWindow(self.hwnd)
 
-    # --- thread-safe public API ---
+    def _paint(self, hwnd):
+        dc, paint = win32gui.BeginPaint(hwnd)
+        try:
+            left, top, right, bottom = win32gui.GetClientRect(hwnd)
+            win32gui.FillRect(dc, (left, top, right, bottom),
+                              win32gui.GetStockObject(win32con.BLACK_BRUSH))
+            if self._drawn is None:
+                return
+            brush = win32gui.SelectObject(dc, win32gui.GetStockObject(win32con.NULL_BRUSH))
+            try:
+                boxes = [(BORDER_COLOR, 3, (1, 1, right - 1, bottom - 1))]
+                boxes.extend((HIGHLIGHT_COLOR, 2, rect) for rect in self._drawn[1])
+                for color, width, rect in boxes:
+                    pen = win32gui.CreatePen(win32con.PS_SOLID, width, _color(color))
+                    old_pen = win32gui.SelectObject(dc, pen)
+                    try:
+                        win32gui.Rectangle(dc, *rect)
+                    finally:
+                        win32gui.SelectObject(dc, old_pen)
+                        win32gui.DeleteObject(pen)
+            finally:
+                win32gui.SelectObject(dc, brush)
+        finally:
+            win32gui.EndPaint(hwnd, paint)
 
+    # Thread-safe public API.
     def track(self, hwnd):
         self._cmd_q.put(("track", hwnd))
 
@@ -171,7 +183,7 @@ class Overlay:
         self._cmd_q.put(("untrack", None))
 
     def set_highlights(self, rects):
-        """rects: list of (x1, y1, x2, y2) in the tracked window's client-relative space."""
+        """Rectangles in the target's client-relative pixel space."""
         self._cmd_q.put(("highlights", rects))
 
     def stop(self):
@@ -186,3 +198,20 @@ def get_overlay():
     if _overlay is None:
         _overlay = Overlay()
     return _overlay
+
+
+@contextmanager
+def hidden_for_capture():
+    """Hide our decoration during screen fallback, preserving attachment/boxes."""
+    overlay = _overlay
+    if overlay is None or not overlay._thread.is_alive():
+        yield
+        return
+    ready = threading.Event()
+    overlay._cmd_q.put(("suspend", ready))
+    try:
+        if not ready.wait(3):
+            raise RuntimeError("outline could not be hidden for screen capture")
+        yield
+    finally:
+        overlay._cmd_q.put(("resume", None))

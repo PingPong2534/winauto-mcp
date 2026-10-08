@@ -19,7 +19,7 @@ permission to operate a canvas or unsupported pattern.
 
 | Group | Tools | Contract |
 | --- | --- | --- |
-| Attachment | `list_windows`, `attach_window`, `detach_window` | Passive target selection; take_control=True refused |
+| Attachment | `list_windows`, `attach_window`, `detach_window` | Background target selection with a green client outline; take_control=True refused |
 | Inspection | `capture_screen`, `screenshot`, `capture_region`, `get_elements`, `read_element` | Client pixels/tree/state; read_element hides password text |
 | UIA actions | `click`, `click_element`, `type_text`, `scroll`, `set_value` | Semantic patterns only; enabled/read-only/integrity checks |
 | Waits/scripts | `wait_for`, `wait_stable`, `run_steps` | Explicit waits; prevalidated batch; journal each step |
@@ -75,6 +75,12 @@ Journal sessions are temporary and retain five folders; history keeps 300
 records in memory. Location cache entries are keyed by process name/client
 size/label and checked against current pixels. Heap diagnostics and debug
 overlays do not implement input control.
+
+Attach shows the green outline and clears prior highlights. The overlay has
+WS_EX_NOACTIVATE and WS_EX_TRANSPARENT and does not raise the target.
+Detach, release_control and highlight([]) hide it; reattach shows it again.
+Screen fallback temporarily hides this decoration and restores it after capture
+or refusal; other covering windows still cause a refusal.
 
 ## Tests
 

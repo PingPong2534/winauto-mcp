@@ -2,7 +2,9 @@
 
 ## Select and inspect
 
-Call `list_windows`, then `attach_window(hwnd)`. Attaching is passive.
+Call `list_windows`, then `attach_window(hwnd)`. Attaching shows a green
+client-area outline without raising the target or taking focus. The outline
+passes mouse input through and follows the target; reattaching clears old highlights.
 `take_control=True` is unsupported. `capture_screen` returns the full client
 image plus a UIA summary; `get_elements` returns detailed JSON. Every element
 has `name`, `automation_id`, `control_type`, `enabled`, `rect`, `runtime_id`
@@ -109,7 +111,9 @@ capture/check checkpoint, not simply the immediately previous action.
 
 `history` lists outcomes and per-step frames; `replay_frame` returns downscaled
 evidence. Journals live under `%TEMP%\winauto-mcp` and retain five sessions.
-`highlight` explicitly shows debug rectangles; `release_control` hides them.
+`highlight` shows red debug rectangles; an empty list hides the overlay.
+`release_control` hides the outline and rectangles while keeping the target attached.
+Call `attach_window` again to restore the green outline.
 `heap_snapshot`/`heap_diff` are optional .NET diagnostics requiring
 `dotnet-gcdump`; a heap collection pauses the target for GC and must be assessed
 separately from UI control.

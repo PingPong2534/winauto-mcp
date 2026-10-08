@@ -404,8 +404,8 @@ def list_windows() -> str:
 
 @tool
 def attach_window(hwnd: int, take_control: bool = False) -> str:
-    """Choose a window for background UIA inspection/control. Never raise it.
-    take_control=True is unsupported; use highlight for a visual indication."""
+    """Choose a background UIA target and show its non-activating green outline.
+    Never raise the target. take_control=True is unsupported."""
     if not window_manager.window_exists(hwnd):
         raise ValueError(f"no such window: {hwnd}")
     if take_control:
@@ -419,8 +419,11 @@ def attach_window(hwnd: int, take_control: bool = False) -> str:
     warning = ""
     if integrity.blocks_input(level):
         warning = "\nWARNING: " + integrity.why_blocked(level, title, window_manager.get_process_name(hwnd))
+    overlay = get_overlay()
+    overlay.set_highlights([])
+    overlay.track(hwnd)
     return (f'attached to "{title}" (hwnd={hwnd}) -- pywinauto UIA; '
-            f'mouse and foreground unchanged; journal session {session}{warning}')
+            f'green outline enabled; mouse and foreground unchanged; journal session {session}{warning}')
 
 
 @tool

@@ -16,6 +16,7 @@ import win32ui
 from PIL import Image, ImageChops
 
 from window_manager import get_client_rect_screen
+from overlay import hidden_for_capture
 
 # Tells PrintWindow to include content drawn outside the classic GDI paint
 # path -- DirectComposition, and the GPU-backed surfaces that engine editors
@@ -118,19 +119,26 @@ def grab_window(hwnd, allow_occluded: bool = True) -> Image.Image:
         # pixels when PrintWindow cannot render the target. Do not raise it.
         if win32gui.IsIconic(hwnd):
             raise ValueError("cannot capture a minimized window without restoring it")
-        target = get_client_rect_screen(hwnd)
-        above = win32gui.GetWindow(hwnd, 3)  # GW_HWNDPREV, higher in Z order
-        while above:
-            if win32gui.IsWindowVisible(above) and not win32gui.IsIconic(above):
-                left, top, right, bottom = win32gui.GetWindowRect(above)
-                if (left < target[2] and right > target[0]
-                        and top < target[3] and bottom > target[1]):
-                    raise ValueError(
-                        "PrintWindow could not render the target and another window covers it; "
-                        "screen capture would show that other app. Use get_elements/read_element "
-                        "or uncover the target manually. No foreground change was made."
-                    )
-            above = win32gui.GetWindow(above, 3)
+        with hidden_for_capture():
+            return _uncovered_screen_grab(hwnd)
+    return _screen_grab(hwnd)
+
+
+def _uncovered_screen_grab(hwnd):
+    """Check occlusion while our own outline is temporarily hidden."""
+    target = get_client_rect_screen(hwnd)
+    above = win32gui.GetWindow(hwnd, 3)  # GW_HWNDPREV, higher in Z order
+    while above:
+        if win32gui.IsWindowVisible(above) and not win32gui.IsIconic(above):
+            left, top, right, bottom = win32gui.GetWindowRect(above)
+            if (left < target[2] and right > target[0]
+                    and top < target[3] and bottom > target[1]):
+                raise ValueError(
+                    "PrintWindow could not render the target and another window covers it; "
+                    "screen capture would show that other app. Use get_elements/read_element "
+                    "or uncover the target manually. No foreground change was made."
+                )
+        above = win32gui.GetWindow(above, 3)
     return _screen_grab(hwnd)
 
 

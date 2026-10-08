@@ -21,7 +21,9 @@ venv's `python.exe` and `server.py`; see [SETUP.md](SETUP.md). The backend is
 
 ## Background control
 
-1. `list_windows()` and `attach_window(hwnd)` select the target without raising it.
+1. `list_windows()` and `attach_window(hwnd)` select the target and show a green
+   client-area outline without raising the target or taking focus. The outline
+   passes mouse input through; reattaching clears previous debug highlights.
 2. `get_elements()` lists names, automation IDs, client rectangles and supported actions.
 3. Prefer `click_element(automation_id="...")`, `type_text(..., automation_id="...", replace=True)` and `set_value(...)`.
 4. `read_element(...)` reads text, toggle/selection state and numeric values to verify results.
@@ -57,8 +59,8 @@ own popup or focus behavior; the server does not call focus/input APIs.
   unsupported input. `keep_cursor` and `stop_if_user_types` are accepted for
   compatibility and have no effect.
 - `keyboard_status` reports blocking/watching off; `release_keyboard` is a no-op.
-  No global keyboard/mouse hooks are installed. `release_control` hides an
-  explicitly requested debug overlay.
+  No global keyboard/mouse hooks are installed. `release_control` hides the
+  outline and debug highlights; the window stays attached. Reattach to show it again.
 - Canvas controls without UIA action patterns cannot be controlled. Screenshots
   and pixel inspection remain available where the app supports capture.
 - Higher-integrity writes are refused before action. Reads depend on the app's
