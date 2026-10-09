@@ -1,6 +1,7 @@
-# Migration status: pywinauto UIA
+# Status: UIA and bounded temporary control
 
-Verified on 2026-10-08 in `feat/pywinauto-backend`.
+Verified on 2026-10-09 in `feat/pywinauto-backend`. Background migration was
+verified on 2026-10-08; temporary foreground control is the subsequent addition.
 
 ## Implemented
 
@@ -8,7 +9,8 @@ Verified on 2026-10-08 in `feat/pywinauto-backend`.
 - Replaced shared-cursor clicks and typing with scoped semantic patterns.
 - Added selector IDs, state readback, literal Unicode text replacement/append,
   numeric slider writes, COM handling per worker, and serialized shared state.
-- Removed foreground takeover and global input guard from production modules.
+- Removed implicit foreground takeover and the legacy global input guard from
+  background modules. Explicit foreground_steps now uses a short-lived gate.
 - Kept unsupported legacy tool names as explicit refusals; no physical fallback.
 - Kept screenshot/stale checks, scripts, journal, cache, overlay and heap tools.
 - Refuse screen fallback that would capture a covering application's pixels.
@@ -34,6 +36,29 @@ Verified on 2026-10-08 in `feat/pywinauto-backend`.
 - Added a complete-bundle installer for Codex and Claude Code: Python dependencies,
   native plugin with the full skill and MCP connection, declared plugin dependencies,
   copied-file verification and real stdio checks before/after registration.
+
+## Temporary foreground control evidence
+
+- Added foreground_steps with explicit allow_takeover/reason, 3000 ms default,
+  1000..8000 ms hard deadline, 400 ms screen-edge announcement, and no renewal.
+- Dedicated low-level keyboard/mouse hooks pass only tagged worker input;
+  physical Escape cancels. Worker timeout or parent death ends the process and
+  removes its hooks. Ordinary UIA tools retain their background/refusal behavior.
+- Ten foreground regressions cover prevalidation, gate/filter/cancel decisions,
+  failed announcement/acquisition, partial errors, restoration failure,
+  escaped foreground, Unicode layouts, native indicator and actual watchdog
+  process termination/parent death. Full suite: 56 tests passed on 2026-10-09.
+- The separate owned-window live probe completed click, physical Thai/emoji
+  input, Backspace, hover, wheel and a fresh 280x80 crop. Readback was ไทย🙂;
+  list top index advanced 0 to 3. Its focus-dependent suggestion appeared while
+  editing, was present in the returned capture, and hid after focus release.
+  Prior focus and cursor were restored. The measured input-gate duration was
+  1375 ms with a 3000 ms budget. This is evidence for the owned fixture only.
+- BlockInput was refused at medium integrity on this host. The selected hook
+  gate/native UIA focus supplement worked without elevation. Mouse injection
+  tags were observed truncated to 32 bits; tags use 31 bits to pass the filter.
+- The server/tool catalog and native client installer checks now expose 35
+  tools, including foreground_steps. Skill frontmatter validation passed.
 
 ## Evidence
 
@@ -73,7 +98,7 @@ Other cases cover duplicate selectors, disabled/read-only/canvas refusals,
 incomplete-tree refusal, unsupported gestures, batch prevalidation/runtime stop, synthetic UIPI
 refusal, stale images, snapshot/diff/journal replay, unavailable covered
 capture, MTA MCP worker calls and STA host threads. Stdio transport verifies
-initialization, 34 tools including control_set, absence of the retired wait tool,
+initialization, 35 tools including control_set/foreground_steps, absence of the retired wait tool,
 passive keyboard status and unattached-write errors
 from a temporary working directory.
 
@@ -84,13 +109,20 @@ Installer evidence: native Codex and Claude Code (2.1.168) plugin CLIs installed
 the complete skill/MCP bundle and a previously absent local prerequisite plugin.
 Reinstallation updated both native skill caches after source changes, kept one
 plugin ID, preserved unrelated settings and verified each installed connector's
-34-tool stdio handshake. The PowerShell entry point also completed with existing
+35-tool stdio handshake. The PowerShell entry point also completed with existing
 Python/venv dependencies. Required-plugin failure blocks main registration;
 preflight failure clears a previous success report.
 Relocated checkouts receive a new connector/cache revision, and a foreign local
 marketplace using the same name is refused without changing its registration.
 
 ## Limits of this verification
+
+The user's actual suggestion app, IME-dependent typing, elevated targets and
+secure/locked desktops have not been verified in temporary mode. Hook callback
+cancellation is covered deterministically; physical Escape has not been manually
+pressed during the live probe. Hook gates are not raw-input/touch/device locks.
+Focus/cursor restoration remains best effort on refusal, cancellation or worker
+termination. See [temporary-control.md](temporary-control.md) for the contract.
 
 Native owned Win32 controls were tested. This is not evidence that every
 third-party app, canvas, custom provider or elevated target supports UIA.
@@ -109,8 +141,9 @@ the guard is removed. No foreground-restoration loop is installed.
 ## Documentation review
 
 Reviewed against source commit 53ef7ca plus removal of the pixel-stability wait
-on 2026-10-08. The server's list_tools output contains the same 34 tools listed
-in SPEC; Python examples were checked against their current signatures.
+on 2026-10-08, when the server exposed 34 tools. On 2026-10-09 the tool catalog,
+skill and examples were extended for foreground_steps (35 tools). Python
+examples were checked against their current signatures.
 Controlled in-memory probes confirm that run_steps can reuse a prior frame when
 capture fails. HOWTOUSE and
 SPEC now describe these limits, batch error/report distinctions, journal frame

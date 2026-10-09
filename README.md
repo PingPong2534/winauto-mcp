@@ -22,7 +22,7 @@ The server uses MCP stdio with absolute paths to the venv's `python.exe` and
 `pywinauto>=0.6.9,<0.7`, with MCP SDK 2.x.
 
 For agents using this MCP, the repository includes the
-[WinAuto MCP skill](skills/winauto-mcp/SKILL.md), covering all 34 tools with
+[WinAuto MCP skill](skills/winauto-mcp/SKILL.md), covering all 35 tools with
 UIA targeting, efficient control sets, capture/cache/diff, journal and heap
 diagnostics, and verified recovery. See
 [skill installation](docs/skill-installation.md) for Codex installation and
@@ -76,7 +76,7 @@ Checkboxes use TogglePattern, items/tabs use SelectionItemPattern, buttons use
 InvokePattern, expandable controls use ExpandCollapsePattern, text uses
 ValuePattern, sliders use RangeValuePattern, and scrolling uses ScrollPattern.
 The application must expose the relevant pattern. Its provider can have its
-own popup or focus behavior; the server does not call focus/input APIs.
+own popup or focus behavior; the background tools do not call focus/input APIs.
 
 For background mutations, the server temporarily adds WS_EX_NOACTIVATE to the
 target and restores that bit afterwards, including on failure. This suppresses
@@ -102,15 +102,15 @@ of the control's bounds at the interaction, not a live UIA tracker after layout 
 
 - `hover`, `drag`, `press_key`, `hotkey`, right/double/modifier clicks,
   `attach_window(take_control=True)` and `keep_foreground(True)` return an
-  explicit unsupported-action error. There is no physical input fallback.
+  explicit unsupported-action error. Background tools never switch to real input.
 - `force=True` only bypasses the coordinate stale-image guard. It cannot enable
   unsupported input. `keep_cursor` and `stop_if_user_types` are accepted for
   compatibility and have no effect.
 - `keyboard_status` reports blocking/watching off; `release_keyboard` is a no-op.
-  No global keyboard/mouse hooks are installed. `release_control` hides the
+  Background tools install no keyboard/mouse hooks. `release_control` hides the
   outline and debug highlights; the window stays attached. Reattach or perform a
   successful interaction to show it again.
-- Canvas controls without UIA action patterns cannot be controlled. Screenshots
+- Canvas controls without UIA action patterns cannot be controlled through UIA. Screenshots
   and pixel inspection remain available where the app supports capture.
 - Writes to a known higher-integrity target are refused before action when the
   server has no UIAccess. Unknown levels do not themselves block a write. Reads
@@ -120,9 +120,42 @@ of the control's bounds at the interaction, not a live UIA tracker after layout 
   covered, capture refuses to return another app's pixels; it never raises the
   target. UIA reads/actions can still be used independently of capture.
 
+## Temporary foreground control
+
+For focus-dependent suggestion boxes, pointer hover, real scrolling or keys,
+use the explicit `foreground_steps` batch. UIA remains the default; the existing
+background tools never switch automatically. The batch announces its reason
+at orange screen edges 400 ms before blocking human input, keeps focus through
+the sequence and final capture, then attempts to restore prior cursor/focus
+before releasing input. Default duration is 3000 ms, hard limit 8000 ms with
+no renewal. A separate worker watchdog terminates on deadline or server death;
+Windows removes the temporary hooks when the worker exits. Physical Esc also
+cancels/releases control. Failed locking/activation aborts, with no unprotected fallback.
+
+```python
+foreground_steps(reason="Customer suggestions", allow_takeover=True, steps=[
+    {"do": "click", "x": 160, "y": 35},  # observed textbox position
+    {"do": "type", "text": "Alice", "replace": True},
+    {"do": "wait", "ms": 250},
+    {"do": "key", "keys": ["down"]},
+    {"do": "key", "keys": ["enter"]},
+    {"do": "capture", "region": [10, 20, 300, 100]},
+])
+```
+
+Inspect `ok` and confirmed completed steps before retrying. Physical text uses
+the actual caret/selection, not the logical UIA target. Capture is fresh visible
+client pixels before focus release. A blocked/hung worker may leave focus or
+cursor changed even though its input gate is released. The gate uses dedicated
+low-level keyboard/mouse hooks, avoiding this host's BlockInput permission
+failure. Activation uses SetForegroundWindow/native UIA SetFocus with verification;
+installation never elevates automatically.
+See [temporary-control usage](skills/winauto-mcp/references/temporary-control.md)
+and [research/design](docs/temporary-control.md).
+
 ## Other tools
 
-The 34 tools also include cropped screenshots, pixel location/cache helpers,
+The 35 tools also include cropped screenshots, pixel location/cache helpers,
 element-presence waits, snapshots/diffs, scripted steps, journal replay,
 debug highlights and .NET heap snapshots. See [HOWTOUSE.md](HOWTOUSE.md) and
 [docs/SPEC.md](docs/SPEC.md) for contracts. Heap tools need `dotnet-gcdump` and

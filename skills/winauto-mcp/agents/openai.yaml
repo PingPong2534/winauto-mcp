@@ -1,4 +1,4 @@
 interface:
   display_name: "WinAuto MCP"
-  short_description: "Control Windows apps with UIA and verify results"
-  default_prompt: "Use $winauto-mcp to inspect the target Windows app, perform the requested UIA actions, and verify the result."
+  short_description: "Windows UIA control and bounded foreground interactions"
+  default_prompt: "Use $winauto-mcp to inspect the Windows app, choose UIA or permitted bounded foreground actions, and verify the result."

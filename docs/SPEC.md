@@ -31,7 +31,7 @@ release_control keeps attachment/state and only hides the decoration.
 Integrity refusal compares known target/server levels, unless the server has
 UIAccess. An unknown integrity level does not itself refuse an action.
 
-## 34 MCP tools
+## 35 MCP tools
 
 | Group | Tools | Contract |
 | --- | --- | --- |
@@ -39,6 +39,7 @@ UIAccess. An unknown integrity level does not itself refuse an action.
 | Inspection | `capture_screen`, `screenshot`, `capture_region`, `get_elements`, `read_element` | Client pixels/tree/state; read_element hides password text |
 | UIA actions | `click`, `click_element`, `type_text`, `scroll`, `set_value` | Semantic patterns only; enabled/read-only/integrity checks |
 | Waits/scripts | `wait_for`, `run_steps`, `control_set` | Element presence/fixed wait steps; prevalidated batches; control_set binds one control and returns only its crop |
+| Temporary takeover | `foreground_steps` | Explicit real-input batch, visible screen-edge announcement, short-lived input hooks, Esc cancel, 1..8-second watchdog, no renewal |
 | Pixel/cache helpers | `locate_in_region`, `snapshot`, `diff_since_snapshot`, `remember_location`, `recall_location` | Freshness and pixel evidence; cache reverified |
 | Debug/evidence | `highlight`, `release_control`, `history`, `replay_frame` | Explicit visual overlay and journal; replay is downscaled |
 | Heap | `heap_snapshot`, `heap_diff` | .NET gcdump, optional external tool, blocking GC |
@@ -61,7 +62,9 @@ UIAccess. An unknown integrity level does not itself refuse an action.
 Coordinate clicks choose the smallest containing interactive UIA control;
 Text labels do not eclipse enclosing buttons. No Desktop.from_point is used.
 There is no SendInput, click_input, type_keys, set_focus or Win32 foreground
-operation in production control paths. UIA provider behavior remains owned by
+operation in background control paths. The separate foreground_steps tool
+explicitly uses input hooks/SendInput/SetForegroundWindow/native UIA SetFocus in a bounded worker.
+See [temporary-control.md](temporary-control.md) for that contract. UIA provider behavior remains owned by
 the target application and is not a universal guarantee of background access.
 
 ## Control-scoped steps
@@ -101,7 +104,7 @@ contains app pixels, not the attach/interaction decoration.
 
 ## Compatibility changes
 
-Text no longer types at the physical caret. Keyboard gestures, hover, drag,
+Background text does not type at the physical caret. Standalone keyboard gestures, hover, drag,
 right/double/modifier clicks, foreground holding and attach takeover no longer
 execute. `force` bypasses only stale image checking; `keep_cursor` and
 `stop_if_user_types` have no effect. `release_keyboard(enable_blocking=True)`
@@ -168,5 +171,5 @@ or refusal; other covering windows still cause a refusal.
 exercise real Value/Invoke/Toggle/RangeValue/Scroll patterns under a cover,
 refusals, readback, script/journal behavior, worker COM and STA hosting. Real
 stdio tests initialize the server from a different directory and verify all
-34 tool names. Historical probes in `tests/legacy` are excluded and require
+35 tool names. Historical probes in `tests/legacy` are excluded and require
 the former backend revision.

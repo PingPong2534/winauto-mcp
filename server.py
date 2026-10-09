@@ -47,6 +47,7 @@ from mcp.server.mcpserver import Image, MCPServer
 
 import heap
 import control_sets
+import foreground_control
 import input_sim
 import integrity
 import journal
@@ -60,7 +61,7 @@ from screenshot import changed_bbox, find_content_bbox, grab_window, to_png
 mcp = MCPServer(
     name="winauto-mcp",
     instructions=(
-        "Control an attached Windows app with pywinauto UIA patterns, without "
+        "Default to pywinauto UIA patterns without "
         "moving the physical cursor, injecting keys, holding input, or raising "
         "the target. Flow: list_windows -> attach_window -> get_elements or "
         "capture_screen -> click_element / type_text / set_value -> read_element "
@@ -78,11 +79,18 @@ mcp = MCPServer(
         "returns only the control's cropped image plus its coordinate offset. "
         "Check ok/completed_steps before retrying a failed set; no rollback occurs. "
         "UIA providers can have their own focus/popup behavior. Canvas-only "
-        "apps and unsupported patterns cannot be controlled in this backend. "
+        "apps and unsupported patterns cannot be controlled by UIA alone. "
         "hover, coordinate drag, right/double/modifier clicks and keyboard "
-        "shortcuts are refused. There is no real-input fallback, including "
+        "shortcuts are refused by the background tools. For a focus-dependent "
+        "suggestion box, real hover or missing scroll/key pattern, explicitly "
+        "use foreground_steps with allow_takeover=True and a short reason. "
+        "It announces takeover at screen edges, blocks human mouse/keyboard, "
+        "keeps focus across the batch and releases it within 1-8 seconds. "
+        "Default timeout is 3 seconds; no renewable hold exists. If input "
+        "blocking or foreground activation fails, do not use unprotected input. "
+        "Ordinary tools never silently switch to real input, including "
         "force=True. keep_cursor and stop_if_user_types are compatibility "
-        "arguments with no effect; no global input hooks are installed. "
+        "arguments with no effect; background tools install no input hooks. "
         "All coordinates are client-relative, matching screenshots. "
         "For coordinates, take a fresh screenshot or locate_in_region and "
         "respect stale-target refusals. A screenshot crop has an offset and "
@@ -579,6 +587,36 @@ def control_set(steps: list[dict], name: str | None = None,
         _mark_seen(frame, rect)
         journal_frame(frame)
         result.append(Image(data=to_png(frame.crop(rect)), format="png"))
+    return result
+
+
+@tool
+def foreground_steps(steps: list[dict], reason: str, timeout_ms: int = 3000,
+                     allow_takeover: bool = False):
+    """Explicit temporary focus + real-input batch for focus-dependent UI.
+    Requires allow_takeover=True and a short visible reason. 1..20 steps:
+    click(x,y,button=left|right), hover(x,y,dwell_ms=500), scroll(x,y,clicks),
+    type(text,replace=False), key(keys=[lowercase names]), wait(ms), and optional
+    final capture(region=[x1,y1,x2,y2]). Coordinates remain client-relative;
+    pointer targets must belong to the attached window or its owned popup.
+    timeout_ms=1000..8000 includes announcement, actions and cleanup; no renewal.
+    Orange screen edges announce before a temporary keyboard/mouse hook gate.
+    Physical Escape cancels and releases the gate. Focus stays through
+    the sequence/capture, then prior cursor/focus restoration is attempted
+    before human input is released. A watchdog ends a stuck worker and Windows
+    removes its hooks. No hooks exist outside the short foreground batch.
+    Lock/activation failure stops; no unlocked input or forced foreground hack.
+    Check report.ok/completed_steps; interrupted step outcome can be unknown.
+    Capture is fresh visible client pixels before focus release, no stale image.
+    """
+    hwnd = _require_attached()
+    report, png = foreground_control.run(hwnd, steps, reason, timeout_ms, allow_takeover)
+    # Real input changes actual focus/caret; do not retain the old logical UIA target.
+    input_sim.reset_target(hwnd)
+    _state['seen'] = []
+    result = [json.dumps(report, ensure_ascii=False)]
+    if png is not None:
+        result.append(Image(data=png, format='png'))
     return result
 
 

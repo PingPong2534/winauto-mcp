@@ -14,7 +14,8 @@ cd F:\tools\winauto-mcp
 
 `uiautomation` is no longer required. An existing venv may still contain it;
 production code does not import it. The installed `pywinauto` uses its UIA
-backend, never its physical input helpers.
+backend for ordinary controls. The explicit foreground_steps mode uses native
+Win32 low-level input hooks/SendInput in a disposable worker, without another plugin.
 
 The installer prepares the venv/dependencies, probes the real server, installs
 declared required plugins, and registers a native plugin containing the complete
@@ -73,8 +74,8 @@ complete-bundle installation path:
 ```
 
 Restart/reconnect the client's MCP session after changing server source or
-configuration, then confirm it exposes 34 tools, including `read_element`,
-`set_value` and `control_set`. Check tool names as well as the count: an older
+configuration, then confirm it exposes 35 tools, including `read_element`,
+`set_value`, `control_set` and `foreground_steps`. Check tool names as well as the count: an older
 process may expose a different tool set after files have changed. The installer
 registers selected clients through their native plugin CLI and backs up settings;
 the examples above do not imply configuration has been applied.

@@ -32,7 +32,7 @@ hides the decoration and keeps the attachment and other state.
 ## Act and verify
 
 Background UIA writes temporarily mark the target WS_EX_NOACTIVATE, then restore
-the added bit even on errors. The server never forces the previous window back
+the added bit even on errors. Background tools never force the previous window back
 to the foreground. App-created popups/custom providers can still change focus.
 
 The last successful click/type/set_value/scroll is outlined in red automatically,
@@ -131,17 +131,21 @@ dependent on PrintWindow; there is no stale-image or foreground fallback.
 ## Unsupported actions
 
 Real hover, drag, key presses, shortcuts, right/double/modifier clicks and
-foreground takeover return an error. They never fall back to SendInput.
+foreground takeover return an error in the standalone background tools. They
+never fall back to SendInput. The explicitly opted-in foreground_steps tool
+supports short real click/hover/scroll/type/key sequences; see
+[temporary control](skills/winauto-mcp/references/temporary-control.md).
 For Save/Enter/Escape shortcuts, use a UIA button or command exposed by the app;
-if it has no semantic equivalent, this backend cannot perform that action.
-For a slider use `set_value`, not drag. Canvas-only controls are unsupported.
+if it has no semantic equivalent, use foreground_steps when temporary takeover
+is permitted. For a slider use set_value; drag remains unsupported. Canvas-only
+controls need the explicit real-input batch rather than UIA actions.
 
-There is no keyboard hold or user-input monitor. `keyboard_status` always
+There is no indefinite keyboard hold or user-input monitor. `keyboard_status` always
 reports blocking/watching off, and `release_keyboard` cannot enable it.
 `keep_cursor` and `stop_if_user_types` are ignored compatibility arguments.
 `keep_foreground(False)` confirms background mode; True errors.
 
-The server makes no focus/input calls, but the app's own UIA provider can show
+The background tools make no focus/input calls, but the app's own UIA provider can show
 popups or change focus in response to a command. Test the actual target app
 before relying on concurrent work with it.
 

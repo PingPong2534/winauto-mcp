@@ -28,7 +28,10 @@ read_element(automation_id="saveStatus")
   to 0–3000 ms.
 - Keep `stop_on_error=True` unless continuing independent failures is required.
   `stop_if_user_types` and `keep_cursor` are compatibility arguments without
-  effect; the server does not watch or block user input.
+  effect; background scripts do not watch or block user input. For a permitted
+  focus-dependent sequence, use foreground_steps as described in
+  [temporary-control.md](temporary-control.md); do not mix two control modes in
+  one script or hold input while planning the next action.
 - Check summary `ok`, `stopped_at_step` and each `steps[].ok`. `performed`
   counts attempted steps, including failures. Completed actions are not
   rolled back; inspect state before retrying mutations.

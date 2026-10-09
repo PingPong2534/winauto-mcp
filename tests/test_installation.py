@@ -145,7 +145,7 @@ class InstallationTests(unittest.TestCase):
                 first = installer.read_json(base / 'state/installation-result.json')
                 self.assertTrue(first['ok'])
                 for client in installer.CLIENTS:
-                    self.assertEqual(first['clients'][client]['tool_count'], 34)
+                    self.assertEqual(first['clients'][client]['tool_count'], 35)
                     self.assertEqual(first['clients'][client]['required_plugins'], [dependency['id']])
                 # Source change must reach both native caches on reinstall.
                 ref = repo / 'skills/winauto-mcp/references/tools.md'

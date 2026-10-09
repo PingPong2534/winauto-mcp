@@ -1,6 +1,6 @@
 # Tool reference
 
-This catalog covers all 34 tools in the UIA backend. Names are unqualified MCP
+This catalog covers all 35 tools in the hybrid UIA/temporary foreground backend. Names are unqualified MCP
 tool names; resolve the client's namespace. Signatures show defaults, not
 executable client functions. Omitted selectors default to `None`.
 Use current app observations for handles, IDs and coordinates.
@@ -246,7 +246,8 @@ Read/failed actions leave existing boxes unchanged; bounds are not live trackers
 ### `release_control`
 
 `release_control()` hides the outline, label and highlights while keeping the
-window attached and other state. It does not release an input lock: none exists.
+window attached and other state. Temporary foreground batches release their own
+lock before returning; this tool does not cancel a running serialized batch.
 The next successful interaction or reattach shows decorations again.
 
 ### `history`
@@ -293,6 +294,49 @@ Look for repeated growth of relevant app types; a single pair includes runtime
 initialization/collection noise and does not establish a leak. The shipped
 noise-floor note is a measurement from another process, not a universal threshold.
 
+## Temporary foreground control
+
+### `foreground_steps`
+
+`foreground_steps(steps,reason,timeout_ms=3000,allow_takeover=False)` explicitly
+opts into temporary focus/cursor takeover and a human-input lock. Requires
+allow_takeover=True and a nonempty single-line reason, at most 120 characters.
+Use it for focus-dependent suggestion boxes, actual hover, missing scroll
+patterns or key navigation. It never runs implicitly from a background tool.
+
+Allow 1..20 steps: click(x,y,button="left"|"right"), hover(x,y,dwell_ms=500),
+scroll(x,y,clicks), type(text,replace=False), key(keys=[...]), wait(ms), and one
+optional final capture(region=[x1,y1,x2,y2]). Step objects use the `do` field.
+Coordinates are client-relative; pointer points must hit the target or owned
+popup. Capture regions must be wholly inside the client. Positive scroll clicks
+send upward wheel notches; negative scrolls downward, as with UIA scroll.
+Wait/dwell is 0..1500 ms, wheel clicks -20..20, text at most 2000 characters.
+Keys: enter/tab/escape/arrows/home/end/backspace/delete, ctrl/shift/alt, a-z, 0-9;
+1..4 unique lowercase names form one chord. No held key/button or drag step.
+Real type inserts at the physical caret; replace sends Ctrl+A first. It does
+not verify ValuePattern readback. Inspect the actual focus and outcome.
+
+Timeout is 1000..8000 ms including announcement/actions/capture/cleanup, default
+3000. An orange desktop-edge signal and reason precede locking input by 400 ms.
+Dedicated low-level keyboard/mouse hooks suppress human/foreign injected input
+and pass only this worker's tagged SendInput events. A watchdog exits on deadline
+or server death. Physical Escape cancels and releases control. Failed indicator,
+lock, activation or escaped foreground aborts; no unlocked fallback or renewal.
+Prior focus/cursor restoration is attempted before unlock. An unexpected worker
+exit releases the OS lock but can leave cursor/focus or an interrupted action
+changed. Hooks run on their own message-pump thread and are removed on release
+or worker exit. This is a short interaction gate, not a secure desktop/device
+lock. The installer never elevates the server automatically.
+
+Returns JSON report plus a fresh visible-client PNG if final capture and batch
+succeed. Inspect ok/completed_steps/stopped_at_step/steps/phase/error and
+restoration fields. Runtime failures and watchdog exits return ok=false;
+confirmed steps are retained and an interrupted step can have unknown outcome.
+No rollback or stale capture. Capture occurs before release so a transient
+popup is visible where it falls within the client. The normal UIA seen-image
+cache/logical target is cleared afterwards; obtain a new background capture.
+Load [temporary-control.md](temporary-control.md) for mode selection/recovery.
+
 ## Unsupported and compatibility tools
 
 These names remain registered to explain older-client requests. Do not call
@@ -301,8 +345,8 @@ them as an attempted workaround for missing semantic patterns.
 ### `hover`
 
 `hover(x,y,dwell_ms=700,force=False)` always refuses real hover; no cursor moves.
-Use exposed UIA state/help text if available; pointer-triggered tooltips may
-have no supported equivalent. `force` cannot enable hover.
+Use exposed UIA state/help text where sufficient, or an explicit hover step in
+foreground_steps when takeover is permitted. `force` cannot enable this tool.
 
 ### `drag`
 
@@ -312,12 +356,14 @@ Use `set_value` for a supported numeric range; arbitrary drag/drop is unavailabl
 ### `press_key`
 
 `press_key(key)` refuses keyboard injection. Use the app's exposed UIA button or
-command for Enter/Escape/Tab-like intent when an equivalent exists.
+command for Enter/Escape/Tab-like intent when an equivalent exists; otherwise
+use an explicit key step in foreground_steps if takeover is permitted.
 
 ### `hotkey`
 
 `hotkey(keys)` refuses shortcut injection, including a list such as `['ctrl','s']`.
-Use an exposed Save command; an app with only a keyboard shortcut is unsupported.
+Use an exposed Save command, or an explicit key chord in foreground_steps when
+takeover is permitted. The standalone tool remains refused.
 
 ### `keep_foreground`
 
@@ -333,4 +379,5 @@ It does not observe the person's typing or make scripts pause for human input.
 ### `release_keyboard`
 
 `release_keyboard(enable_blocking=True)` is a compatibility no-op returning
-that blocking is off. Either argument value leaves it off; no input hold exists.
+that blocking is off. Either argument value leaves it off; it does not manage
+foreground_steps. That batch owns its lock and releases it before returning.
