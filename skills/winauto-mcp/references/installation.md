@@ -32,3 +32,7 @@ If only this portable skill folder is available, locate the matching repository
 before server installation. It does not contain a server or standalone installer.
 Report missing CLI/prerequisites/source or an unsupported client explicitly;
 do not substitute an MCP-only install.
+
+For a failed installation/connection or an unsupported client blocking the task,
+follow [issue-reporting.md](issue-reporting.md). Include the sanitized installation
+phase/error and available version metadata; do not publish configuration secrets.

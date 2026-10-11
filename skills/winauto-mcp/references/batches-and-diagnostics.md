@@ -78,3 +78,6 @@ read_element(automation_id="saveStatus")
 For optional .NET memory investigation, load the Managed heap section in
 [tools.md](tools.md); it covers snapshot labels, repeated-cycle comparison,
 collection side effects and interpretation limits.
+
+If diagnosis reveals an MCP issue or a limitation blocking the requested workflow,
+follow [issue-reporting.md](issue-reporting.md) to file or update its GitHub report.
