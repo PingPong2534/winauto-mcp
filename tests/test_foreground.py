@@ -11,6 +11,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from unittest.mock import Mock, patch
@@ -86,11 +87,104 @@ class ForegroundTests(unittest.TestCase):
         self.assertLess(names.index('indicator.wait'), names.index('native.block'))
         self.assertLess(names.index('native.block'), names.index('native.activate'))
         self.assertLess(names.index('native.restore'), names.index('native.unblock'))
+        self.assertLess(names.index('native.release_mouse'), names.index('native.restore'))
         self.assertLess(names.index('native.unblock'), names.index('indicator.close'))
         self.assertEqual(native.activate.call_count, 1)  # no focus restoration between steps
         self.assertEqual(report['completed_steps'], 4)
         self.assertTrue(report['ok'])
         self.assertFalse(report['input_blocked'])
+        self.assertTrue(report['mouse_buttons_released'])
+
+    def native_mouse(self):
+        native = object.__new__(control.NativeInput)
+        native.held_mouse = 0
+        native.stopping = False
+        native.dispatch_lock = threading.Lock()
+        native.tag = 123
+        native.guard = Mock()
+        native.user = Mock()
+        native.user.SendInput.side_effect = lambda count, events, size: count
+        return native
+
+    def test_drag_validation_budget_and_explicit_standalone_opt_in(self):
+        step = {'do': 'drag', 'x1': 20, 'y1': 40, 'x2': 120, 'y2': 80}
+        control.validate([step, {'do': 'capture'}], 'Drag test', 3000, True)
+        for change in ({'duration_ms': 99}, {'duration_ms': 1501}, {'x2': 1.2},
+                       {'button': 'middle'}, {'x2': 20, 'y2': 40}, {'duration_ms': True}):
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                control.validate([dict(step, **change)], 'Drag test', 3000, True)
+        with self.assertRaisesRegex(ValueError, 'no time'):
+            control.validate([dict(step, duration_ms=1000)], 'Drag test', 1000, True)
+        with patch.object(server, 'foreground_control') as backend:
+            with self.assertRaises(server.input_sim.UnsupportedAction):
+                server.drag(20, 40, 120, 80, force=True)
+            backend.run.assert_not_called()
+            with patch.object(server, '_require_attached', return_value=123), patch.object(server.input_sim, 'reset_target'):
+                backend.run.return_value = ({'ok': True}, None)
+                result = server.drag(20, 40, 120, 80, allow_takeover=True, reason='Move card')
+            self.assertTrue(json.loads(result[0])['ok'])
+            self.assertEqual(backend.run.call_args.args[1][0]['do'], 'drag')
+
+    def test_drag_holds_button_across_motion_then_releases_on_success_or_cancel(self):
+        for button, down in (('left', 2), ('right', 8)):
+            for cancelled in (False, True):
+                with self.subTest(button=button, cancelled=cancelled):
+                    native = self.native_mouse()
+                    native.check_point = Mock()
+                    points = []
+                    native.point = lambda x, y: points.append((x, y, native.held_mouse))
+                    wait = Mock(side_effect=RuntimeError('Escape') if cancelled else None)
+                    if cancelled:
+                        with self.assertRaisesRegex(RuntimeError, 'Escape'):
+                            native.drag(10, 20, 110, 70, button, 100, wait)
+                    else:
+                        native.drag(10, 20, 110, 70, button, 100, wait)
+                        self.assertEqual(points[-1][:2], (110, 70))
+                        self.assertGreater(len(points), 2)
+                        self.assertTrue(all(point[2] == down for point in points[1:]))
+                    self.assertEqual(native.held_mouse, 0)
+                    last = native.user.SendInput.call_args.args[1]
+                    self.assertEqual(last[0].mi.dwFlags, 4 if button == 'left' else 16)
+                    self.assertEqual(last[0].mi.dwExtraInfo, native.tag)
+
+    def test_drag_refuses_covered_path_before_down_and_releases_partial_send(self):
+        native = self.native_mouse()
+        native.check_point = Mock(side_effect=RuntimeError('covered'))
+        with self.assertRaisesRegex(RuntimeError, 'covered'):
+            native.drag(10, 20, 110, 70, 'left', 100, Mock())
+        native.user.SendInput.assert_not_called()
+        native.user.SendInput.side_effect = [1, 1]  # click applies down but not up
+        with self.assertRaisesRegex(RuntimeError, 'partial'):
+            native.mouse([2, 4])
+        self.assertEqual(native.held_mouse, 2)
+        native.guard.side_effect = RuntimeError('foreground escaped')
+        native.release_mouse(stop=True)  # cleanup can emit only up despite lost focus
+        self.assertEqual(native.held_mouse, 0)
+        self.assertEqual(native.user.SendInput.call_args.args[1][0].mi.dwFlags, 4)
+        native.guard.side_effect = None
+        with self.assertRaisesRegex(RuntimeError, 'stopping'):
+            native.mouse([2])
+
+    def test_failed_mouse_release_skips_cursor_restore_and_still_unblocks(self):
+        native = Mock()
+        native.release_mouse.side_effect = RuntimeError('button-up refused')
+        report, _, _, _ = self.execute(native)
+        self.assertFalse(report['ok'])
+        self.assertFalse(report['mouse_buttons_released'])
+        native.restore.assert_not_called()
+        native.unblock.assert_called_once()
+
+    def test_watchdog_attempts_cleanup_before_deadline_exit(self):
+        with tempfile.TemporaryDirectory(prefix='winauto-drag-watchdog-') as folder:
+            marker = Path(folder) / 'cleanup.txt'
+            script = ('import foreground_control as f,threading,time,sys; from pathlib import Path; '
+                      'f.watchdog(int(sys.argv[1]),100,threading.Event(),'
+                      'lambda: Path(sys.argv[2]).write_text("released"))')
+            worker = subprocess.run([sys.executable, '-c', script, str(os.getpid()), str(marker)],
+                                    cwd=str(Path(control.__file__).parent),
+                                    creationflags=subprocess.CREATE_NO_WINDOW, timeout=4)
+            self.assertEqual(worker.returncode, 124)
+            self.assertEqual(marker.read_text(), 'released')
 
     def test_indicator_failure_or_block_refusal_never_takes_focus(self):
         for failure in ('show', 'block'):

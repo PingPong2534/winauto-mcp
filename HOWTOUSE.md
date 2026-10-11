@@ -130,14 +130,16 @@ dependent on PrintWindow; there is no stale-image or foreground fallback.
 
 ## Unsupported actions
 
-Real hover, drag, key presses, shortcuts, right/double/modifier clicks and
+Real hover, key presses, shortcuts, right/double/modifier clicks and
 foreground takeover return an error in the standalone background tools. They
 never fall back to SendInput. The explicitly opted-in foreground_steps tool
-supports short real click/hover/scroll/type/key sequences; see
+supports short real click/drag/hover/scroll/type/key sequences; see
 [temporary control](skills/winauto-mcp/references/temporary-control.md).
 For Save/Enter/Escape shortcuts, use a UIA button or command exposed by the app;
 if it has no semantic equivalent, use foreground_steps when temporary takeover
-is permitted. For a slider use set_value; drag remains unsupported. Canvas-only
+is permitted. For a slider use set_value. For click-drag, use a foreground drag
+step or `drag(...,allow_takeover=True,reason="Move card")`; the default refuses.
+The straight path must remain inside the attached window/owned popup. Canvas-only
 controls need the explicit real-input batch rather than UIA actions.
 
 There is no indefinite keyboard hold or user-input monitor. `keyboard_status` always

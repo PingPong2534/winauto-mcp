@@ -8,6 +8,8 @@ placing the caret or generating ordinary key events. Some suggestion lists
 need a real focus/caret/key sequence; hover needs the shared pointer; a canvas
 or custom scroll surface may lack ScrollPattern. These justify `foreground_steps`
 when consistent with the user's current task and takeover preferences.
+Click-drag also requires this explicit mode; use `set_value` for a supported
+slider when it achieves the requested result without pointer input.
 
 Tell the user the reason and short expected duration before the call. Existing
 authorization for this mode persists; do not repeatedly ask for permission.
@@ -119,6 +121,11 @@ allowed only as the last step; unlike `control_set`, capture is not required.
   restoration is attempted before unblocking. Restoration is best effort, not
   guaranteed. A foreground change to an unrelated window aborts without stealing
   it back. The physical keyboard target must remain in the attached window family.
+- Tracked mouse buttons are released before cursor/focus restoration, including
+  failed drags and Escape. The watchdog also attempts button-ups before exiting.
+  Cleanup sends only those button-ups when normal input guards have failed.
+  A hard crash/forced kill or a rejected SendInput can prevent confirmation;
+  inspect `mouse_buttons_released` instead of assuming exit resets button state.
 - A separate watchdog exits the worker at deadline or server death. Its input
   hooks disappear on worker exit. Physical Escape cancels and removes the gate;
   cancellation skips cursor/focus restoration to avoid overriding human action.
@@ -135,7 +142,7 @@ allowed only as the last step; unlike `control_set`, capture is not required.
 ## Verify and recover
 
 Inspect report `ok`, `completed_steps`, `stopped_at_step`, `steps`, `error`,
-`phase`, `input_blocked_ms`, `focus_restored` and `cursor_restored`. A normal
+`phase`, `input_blocked_ms`, `mouse_buttons_released`, `focus_restored` and `cursor_restored`. A normal
 release has `phase="released"`; check `ok` as well because failed actions can
 still release normally. Restoration flags describe the cleanup result, not
 business success. Completed actions are not rolled back. A
@@ -149,3 +156,34 @@ the returned capture to verify a transient list/tooltip that closes on focus
 release; a later screenshot cannot prove that earlier transient state. The
 foreground batch's final crop is evidence, not an automatic coordinate grant
 for later background actions; take a new capture after returning to UIA.
+
+## Click-drag
+
+Use current client-pixel start/end points from inspection, with a clear straight
+path inside the attached window or owned popup. The worker checks the sampled
+path before button-down and checks ownership/foreground again during motion.
+Do not drag between applications or across a known foreign overlay. Drag
+duration is 100..1500 ms (default 500), included in the total takeover budget.
+No standalone down/up or button hold across calls is supported.
+
+```python
+# Replace all coordinates with the observed source and destination.
+foreground_steps(
+    reason="Move card within board",
+    timeout_ms=3000,
+    allow_takeover=True,
+    steps=[
+        {"do": "drag", "x1": 80, "y1": 120, "x2": 260, "y2": 220,
+         "button": "left", "duration_ms": 500},
+        {"do": "capture"},
+    ],
+)
+```
+
+For a single gesture without an image, use
+`drag(x1,y1,x2,y2,reason="Move card",allow_takeover=True)`. `force=True` does
+not authorize takeover. Check `ok`, `completed_steps`, `mouse_buttons_released`
+and actual app state: release at the destination does not prove a drop was
+accepted. Cancellation may leave a partial move/selection or release at an
+intermediate point; inspect before retrying. The legacy background `run_steps`
+does not accept drag; use `foreground_steps` for drag plus capture.

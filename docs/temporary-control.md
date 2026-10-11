@@ -74,7 +74,20 @@ exit makes the in-flight step outcome unknown and can skip focus/cursor restore.
 Read current state before retrying. Physical type uses the actual caret;
 replace is Ctrl+A. There is no semantic readback inside a batch. Clear logical
 UIA target/seen-image cache after returning. Off-client popup pixels require
-separate attachment. No drag/held key/button or renewable lease is exposed.
+separate attachment. Drag is supported as a foreground step or explicitly opted-in
+`drag` call: straight client-pixel path, left/right button, duration 100..1500 ms.
+The worker prechecks sampled path ownership, then rechecks during motion. No
+cross-app drop, held key/button between steps/calls or renewable lease is exposed.
+Tracked button-ups precede cursor/focus restoration on normal/error cleanup;
+Escape/lost-focus cleanup may emit only those ups without ordinary input guards.
+The watchdog attempts the same release before exit. Forced kill or native input
+failure may leave release unconfirmed; inspect `mouse_buttons_released` (null
+after worker exit), not process termination alone.
+
+Mouse state uses explicit down/motion/up events per Microsoft's
+[MOUSEINPUT contract](https://learn.microsoft.com/en-us/windows/win32/api/winuser/ns-winuser-mouseinput).
+An accepted [SendInput](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-sendinput)
+count proves injection, not application drop acceptance; verify the app outcome.
 
 Other applications can still change foreground between a guard and dispatch.
 Low-level hooks are shared desktop resources and may conflict with another

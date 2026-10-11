@@ -100,9 +100,15 @@ of the control's bounds at the interaction, not a live UIA tracker after layout 
 
 ## Compatibility and limits
 
-- `hover`, `drag`, `press_key`, `hotkey`, right/double/modifier clicks,
+- `hover`, `press_key`, `hotkey`, right/double/modifier clicks,
   `attach_window(take_control=True)` and `keep_foreground(True)` return an
   explicit unsupported-action error. Background tools never switch to real input.
+- `drag` now supports explicit temporary takeover with `allow_takeover=True` and
+  a visible `reason`. Or use a `foreground_steps` drag plus final capture. The
+  straight path must stay in the attached window/owned popup; drag duration is
+  100..1500 ms. Buttons are released before restoring cursor/focus, including
+  failed drags. Defaults and background `run_steps` still refuse gestures. See
+  [drag workflow](skills/winauto-mcp/references/temporary-control.md#click-drag).
 - `force=True` only bypasses the coordinate stale-image guard. It cannot enable
   unsupported input. `keep_cursor` and `stop_if_user_types` are accepted for
   compatibility and have no effect.

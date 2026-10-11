@@ -1,6 +1,6 @@
 ---
 name: winauto-mcp
-description: "Install, control and verify Windows desktop apps with winauto MCP on Codex or Claude Code. Use background UIA by default and explicit bounded foreground batches for focus-dependent suggestion boxes, pointer hover, real scrolling or keys. Includes all 35 tools, capture/cache/diff, journal, .NET heap diagnostics and partial-failure recovery. Requires the connected winauto MCP server for app control."
+description: "Install, control and verify Windows desktop apps with winauto MCP on Codex or Claude Code. Use background UIA by default and explicit bounded foreground batches for focus-dependent suggestion boxes, click-drag, hover, scrolling or keys. Includes all 35 tools, capture/cache/diff, journal, .NET heap diagnostics and partial-failure recovery. Requires the connected winauto MCP server for app control."
 ---
 
 # WinAuto MCP
@@ -31,7 +31,7 @@ runtime + skill + enabled MCP connection + declared required plugins together.
 | One supported semantic action or state read | Individual UIA tool; background by default |
 | One control: click/type and fresh final control crop | `control_set` |
 | Several known controls using semantic actions | `run_steps`; check its capture limits in the batch reference |
-| Focus-dependent suggestions, actual hover, physical keys or a scroll surface without a usable UIA pattern | Explicit `foreground_steps`, only when temporary takeover is permitted |
+| Focus-dependent suggestions, click-drag, actual hover, physical keys or a scroll surface without a usable UIA pattern | Explicit `foreground_steps`, only when temporary takeover is permitted; `drag` also accepts explicit opt-in |
 
 Prefer UIA whenever it performs the requested app behavior. UIA text writes
 change the value without placing a physical caret or reproducing ordinary key
@@ -159,8 +159,10 @@ There is no pixel-stability wait tool or script step.
   Never replay completed writes, toggles, selections or submissions blindly;
   an interrupted action can have an unknown outcome.
 - Standalone hover/key/hotkey and right/double/modifier background clicks remain
-  refused. `foreground_steps` supports bounded real click/hover/scroll/type/key
-  sequences; drag, `take_control=True` and `keep_foreground(True)` stay unsupported.
+  refused. `foreground_steps` supports bounded real click/drag/hover/scroll/type/key
+  sequences. `drag` requires `allow_takeover=True` and a visible `reason`; its
+  default still refuses physical input. `take_control=True` and
+  `keep_foreground(True)` stay unsupported.
   Prefer an exposed command for Save/Enter and `set_value` for sliders when suitable.
 - Hide decorations with `release_control()` when finished; it keeps the window
   attached. Use `detach_window()` when ending the attachment.
@@ -180,7 +182,7 @@ using a feature beyond the core workflow or checking an unfamiliar parameter:
 | UIA tree/state and full/cropped pixels | Inspection and capture |
 | Buttons, text, toggle/selection, range or scroll | Semantic actions |
 | One-control sets, multi-control scripts, presence checks | Sets, scripts and presence |
-| Focus-dependent suggestions, real hover/scroll/keys | Temporary foreground control; also load temporary-control.md |
+| Focus-dependent suggestions, click-drag, real hover/scroll/keys | Temporary foreground control; also load temporary-control.md |
 | Contrast location, persistent location cache, pixel differences | Pixel location, cache and diffs |
 | Manual highlights, decoration cleanup, history or replay | Overlays and journal |
 | Managed object counts and repeated-cycle growth | Managed heap |

@@ -43,7 +43,8 @@ UIAccess. An unknown integrity level does not itself refuse an action.
 | Pixel/cache helpers | `locate_in_region`, `snapshot`, `diff_since_snapshot`, `remember_location`, `recall_location` | Freshness and pixel evidence; cache reverified |
 | Debug/evidence | `highlight`, `release_control`, `history`, `replay_frame` | Explicit visual overlay and journal; replay is downscaled |
 | Heap | `heap_snapshot`, `heap_diff` | .NET gcdump, optional external tool, blocking GC |
-| Unsupported input | `hover`, `drag`, `press_key`, `hotkey` | Error without physical input |
+| Explicit gesture | `drag` | Requires allow_takeover + reason; bounded foreground worker |
+| Unsupported input | `hover`, `press_key`, `hotkey` | Error without physical input |
 | Compatibility | `keep_foreground`, `keyboard_status`, `release_keyboard` | Foreground True refused; no input watching/blocking |
 
 ## Action mapping
@@ -104,12 +105,20 @@ contains app pixels, not the attach/interaction decoration.
 
 ## Compatibility changes
 
-Background text does not type at the physical caret. Standalone keyboard gestures, hover, drag,
+Background text does not type at the physical caret. Standalone keyboard gestures, hover,
 right/double/modifier clicks, foreground holding and attach takeover no longer
 execute. `force` bypasses only stale image checking; `keep_cursor` and
 `stop_if_user_types` have no effect. `release_keyboard(enable_blocking=True)`
 cannot enable input blocking. Deprecated tool names remain registered so old
 clients receive a clear error instead of silently injecting input.
+
+Drag now requires explicit `allow_takeover=True` and a visible `reason`, either
+through `drag` or a foreground_steps drag. Duration 100..1500 ms, default 500;
+the straight path must stay inside the attached window/owned popup. Normal
+run_steps still rejects drag. Tracked mouse buttons are released before restoring
+cursor/focus, even after Escape/failed motion. Watchdog cleanup attempts button-ups
+before exit. Report mouse_buttons_released is null after an unconfirmed worker
+exit; hard termination does not prove button release.
 
 The initial coordinate click in a batch uses the caller's latest relevant
 view. After a script action mutates the UI, later predicted coordinates are

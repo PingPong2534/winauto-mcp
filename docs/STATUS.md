@@ -1,6 +1,6 @@
 # Status: UIA and bounded temporary control
 
-Verified on 2026-10-09 in `feat/pywinauto-backend`. Background migration was
+Verified on 2026-10-11 in `feat/pywinauto-backend`. Background migration was
 verified on 2026-10-08; temporary foreground control is the subsequent addition.
 
 ## Implemented
@@ -61,6 +61,28 @@ verified on 2026-10-08; temporary foreground control is the subsequent addition.
   tools, including foreground_steps. Skill frontmatter validation passed.
 
 ## Evidence
+
+### Click-drag (2026-10-11)
+
+- Added opt-in `drag(...,allow_takeover=True,reason=...)` and foreground_steps
+  drag with left/right button, straight client-pixel path and 100..1500 ms
+  duration. Defaults and background run_steps still refuse physical gestures.
+- Sampled path checks precede button-down; ownership/foreground are rechecked
+  during movement. Tracked mouse-ups run before cursor/focus restoration on
+  success/failure/Escape. Watchdog attempts release before exit; forced worker
+  termination cannot confirm release and reports mouse_buttons_released=null.
+- Five new foreground regressions cover drag timing/budget/opt-in, held-button
+  motion and cancellation, covered paths, partial SendInput, release failure
+  and watchdog cleanup. Transport checks the actual drag MCP opt-in schema.
+  Full smoke suite: 61 tests passed in 112.125 seconds on 2026-10-11, including
+  native Codex/Claude installation tests in isolated client homes.
+- `tests/probe_drag.py` exercised the real worker on an owned HWND: start
+  (40,450), end (240,480), 25 held-button move messages, received mouse-up,
+  fresh 640x90 capture, both physical button states up, cursor/focus restored.
+  Gate duration was 1750 ms with a 3000 ms budget. This verifies the fixture;
+  acceptance of a drop in a user's application remains app-dependent.
+
+### Background and installer evidence
 
 The UIA/outline/transport suite contains 40 tests: 32 UIA tests, seven native
 outline tests and one real MCP stdio test. Six installer regression tests additionally

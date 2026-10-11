@@ -80,10 +80,11 @@ mcp = MCPServer(
         "Check ok/completed_steps before retrying a failed set; no rollback occurs. "
         "UIA providers can have their own focus/popup behavior. Canvas-only "
         "apps and unsupported patterns cannot be controlled by UIA alone. "
-        "hover, coordinate drag, right/double/modifier clicks and keyboard "
+        "hover, unapproved drag, right/double/modifier clicks and keyboard "
         "shortcuts are refused by the background tools. For a focus-dependent "
         "suggestion box, real hover or missing scroll/key pattern, explicitly "
         "use foreground_steps with allow_takeover=True and a short reason. "
+        "Drag is supported as a bounded foreground step or the explicitly opted-in drag tool. "
         "It announces takeover at screen edges, blocks human mouse/keyboard, "
         "keeps focus across the batch and releases it within 1-8 seconds. "
         "Default timeout is 3 seconds; no renewable hold exists. If input "
@@ -595,7 +596,8 @@ def foreground_steps(steps: list[dict], reason: str, timeout_ms: int = 3000,
                      allow_takeover: bool = False):
     """Explicit temporary focus + real-input batch for focus-dependent UI.
     Requires allow_takeover=True and a short visible reason. 1..20 steps:
-    click(x,y,button=left|right), hover(x,y,dwell_ms=500), scroll(x,y,clicks),
+    click(x,y,button=left|right), drag(x1,y1,x2,y2,button=left|right,duration_ms=500),
+    hover(x,y,dwell_ms=500), scroll(x,y,clicks),
     type(text,replace=False), key(keys=[lowercase names]), wait(ms), and optional
     final capture(region=[x1,y1,x2,y2]). Coordinates remain client-relative;
     pointer targets must belong to the attached window or its owned popup.
@@ -712,9 +714,23 @@ def press_key(key: str) -> str:
 
 @tool
 def drag(x1: int, y1: int, x2: int, y2: int, button: str = "left",
-         force: bool = False, keep_cursor: bool = False):
-    """Unsupported coordinate gesture; use set_value for a UIA slider."""
-    input_sim.drag_in_window(_require_attached(), x1, y1, x2, y2, button=button)
+         force: bool = False, keep_cursor: bool = False, duration_ms: int = 500,
+         reason: str = "", timeout_ms: int = 3000, allow_takeover: bool = False):
+    """Click-drag through the bounded foreground worker; explicit takeover required.
+    Client-pixel endpoints/path must remain in the attached window/owned popup.
+    duration_ms=100..1500; timeout_ms=1000..8000 covers the entire takeover.
+    Requires allow_takeover=True and a visible reason. Left/right buttons only.
+    Uses the same screen-edge announcement, input gate, Escape and watchdog as
+    foreground_steps. Releases the mouse before restoring focus/cursor; inspect
+    report.ok and mouse_buttons_released. No automatic capture; use a foreground
+    drag + final capture batch for evidence. force/keep_cursor cannot opt in or
+    disable ownership checks/restoration. Prefer set_value for a UIA slider.
+    """
+    if allow_takeover is not True:
+        input_sim.unsupported('drag requires allow_takeover=True and a reason; use set_value for a UIA slider')
+    return foreground_steps.__wrapped__(steps=[{'do': 'drag', 'x1': x1, 'y1': y1,
+        'x2': x2, 'y2': y2, 'button': button, 'duration_ms': duration_ms}],
+        reason=reason, timeout_ms=timeout_ms, allow_takeover=allow_takeover)
 
 
 @tool

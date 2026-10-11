@@ -35,6 +35,7 @@ def validate(steps, reason, timeout_ms, allow_takeover):
     if not isinstance(steps, list) or not 1 <= len(steps) <= 20:
         raise ValueError('steps must contain 1..20 steps')
     schemas = {'click': ({'x', 'y'}, {'button'}), 'hover': ({'x', 'y'}, {'dwell_ms'}),
+               'drag': ({'x1', 'y1', 'x2', 'y2'}, {'button', 'duration_ms'}),
                'scroll': ({'x', 'y', 'clicks'}, set()), 'type': ({'text'}, {'replace'}),
                'key': ({'keys'}, set()), 'wait': ({'ms'}, set()), 'capture': (set(), {'region'})}
     requested_ms = 400  # visible announcement before any input is blocked
@@ -44,11 +45,18 @@ def validate(steps, reason, timeout_ms, allow_takeover):
         required, optional = schemas[step['do']]
         if not required <= step.keys() or set(step) - required - optional - {'do'}:
             raise ValueError(f'step {i}: missing or unknown fields')
-        for field in ('x', 'y', 'clicks', 'ms', 'dwell_ms'):
+        for field in ('x', 'y', 'x1', 'y1', 'x2', 'y2', 'clicks', 'ms', 'dwell_ms', 'duration_ms'):
             if field in step and type(step[field]) is not int:
                 raise ValueError(f'step {i}: {field} must be an integer')
         if step.get('button', 'left') not in ('left', 'right'):
             raise ValueError(f'step {i}: button must be left or right')
+        if step['do'] == 'drag':
+            duration = step.get('duration_ms', 500)
+            if not 100 <= duration <= 1500:
+                raise ValueError(f'step {i}: duration_ms must be 100..1500')
+            if (step['x1'], step['y1']) == (step['x2'], step['y2']):
+                raise ValueError(f'step {i}: drag endpoints must differ')
+            requested_ms += duration
         if step['do'] == 'scroll' and not -20 <= step['clicks'] <= 20:
             raise ValueError(f'step {i}: clicks must be -20..20')
         if step['do'] == 'type':
@@ -113,6 +121,7 @@ def run(hwnd, steps, reason, timeout_ms=3000, allow_takeover=False):
                           input_released_by_worker_exit=True,
                           interrupted_step_outcome='unknown; inspect state before retrying')
             report.update(input_blocked=False, phase='worker_exited')
+            report['mouse_buttons_released'] = None  # cleanup cannot be confirmed after a crash
             if stderr:
                 report['diagnostic'] = stderr.decode('utf-8', errors='replace')[:1000]
         # A successful capture can precede a failed release; never mislabel it as batch success.
@@ -158,6 +167,9 @@ class NativeInput:
         self.gui, self.process, self.windows = win32gui, win32process, window_manager
         self.hwnd, self.pid = hwnd, pid
         self.gate = None
+        self.held_mouse = 0
+        self.stopping = False
+        self.dispatch_lock = threading.Lock()
         # Windows' mouse input path can truncate dwExtraInfo to 32 bits even
         # in a 64-bit process. Keep the per-worker tag within that width.
         self.tag = secrets.randbits(31) or 1
@@ -228,6 +240,26 @@ class NativeInput:
 
     def send(self, events):
         self.guard()
+        with self.dispatch_lock:
+            self._send_guarded(events)
+
+    def _send_guarded(self, events):
+        if self.stopping:
+            raise RuntimeError('worker is stopping; no more input permitted')
+        # Mark possible downs before dispatch: a short SendInput may have applied
+        # a down without its matching up. Cleanup emits only tracked button-ups.
+        for event in events:
+            if event.type == 0:
+                self.held_mouse |= event.mi.dwFlags & (2 | 8)
+        self.raw_send(events)
+        for event in events:
+            if event.type == 0:
+                if event.mi.dwFlags & 4:
+                    self.held_mouse &= ~2
+                if event.mi.dwFlags & 16:
+                    self.held_mouse &= ~8
+
+    def raw_send(self, events):
         for event in events:
             if event.type == 1:
                 event.ki.dwExtraInfo = self.tag
@@ -268,9 +300,7 @@ class NativeInput:
 
     def point(self, x, y):
         self.guard()
-        point = self.gui.ClientToScreen(self.hwnd, (x, y))
-        if not self.belongs(self.gui.WindowFromPoint(point)):
-            raise RuntimeError('pointer point is covered or outside the attached window/owned popup')
+        point = self.check_point(x, y)
         # Tagged SendInput motion is allowed by our gate; human/foreign motion is suppressed.
         left, top = self.api.GetSystemMetrics(76), self.api.GetSystemMetrics(77)
         width, height = self.api.GetSystemMetrics(78), self.api.GetSystemMetrics(79)
@@ -291,6 +321,47 @@ class NativeInput:
 
     def mouse(self, flags, data=0):
         self.send([_Input(type=0, mi=_Mouse(dwFlags=flag, mouseData=data & 0xFFFFFFFF)) for flag in flags])
+
+    def check_point(self, x, y):
+        point = self.gui.ClientToScreen(self.hwnd, (x, y))
+        if not self.belongs(self.gui.WindowFromPoint(point)):
+            raise RuntimeError('pointer point is covered or outside the attached window/owned popup')
+        return point
+
+    def release_mouse(self, stop=False):
+        # Cleanup must remain possible after Escape, lost focus or a dead gate.
+        # Never move, click or send a down in this unguarded cleanup path.
+        if stop:
+            self.stopping = True
+        # Normal dispatch cannot race a terminal release. If a native call is
+        # stuck, the watchdog still attempts button-ups before terminating.
+        acquired = self.dispatch_lock.acquire(timeout=0.1)
+        try:
+            held = self.held_mouse
+            events = [_Input(type=0, mi=_Mouse(dwFlags=up))
+                      for down, up in ((2, 4), (8, 16)) if held & down]
+            if events:
+                self.raw_send(events)
+                self.held_mouse &= ~held
+        finally:
+            if acquired:
+                self.dispatch_lock.release()
+
+    def drag(self, x1, y1, x2, y2, button, duration_ms, wait):
+        count = max(2, (duration_ms + 19) // 20)
+        points = [(round(x1 + (x2 - x1) * i / count),
+                   round(y1 + (y2 - y1) * i / count)) for i in range(count + 1)]
+        self.guard()
+        for x, y in points:  # refuse an already covered path before pressing
+            self.check_point(x, y)
+        self.point(x1, y1)
+        try:
+            self.mouse([2 if button == 'left' else 8])
+            for x, y in points[1:]:
+                wait(duration_ms / count, self.guard)
+                self.point(x, y)  # recheck changing ownership/occlusion and foreground
+        finally:
+            self.release_mouse()
 
     def restore(self):
         # Restore before unblocking, so cleanup cannot override a subsequent human switch.
@@ -342,6 +413,9 @@ def execute(request, native, indicator, publish):
                 native.point(step['x'], step['y'])
             if kind == 'click':
                 native.mouse([2, 4] if step.get('button', 'left') == 'left' else [8, 16])
+            elif kind == 'drag':
+                native.drag(step['x1'], step['y1'], step['x2'], step['y2'],
+                            step.get('button', 'left'), step.get('duration_ms', 500), indicator.wait)
             elif kind == 'hover':
                 indicator.wait(step.get('dwell_ms', 500), native.guard)
             elif kind == 'scroll':
@@ -365,9 +439,15 @@ def execute(request, native, indicator, publish):
     finally:
         if locked:
             try:
-                report.update(native.restore())
+                native.release_mouse(stop=True)
+                report['mouse_buttons_released'] = True
             except Exception as exc:
-                report['restore_error'] = str(exc)
+                report.update(ok=False, mouse_buttons_released=False, mouse_release_error=str(exc))
+            if report['mouse_buttons_released']:
+                try:
+                    report.update(native.restore())
+                except Exception as exc:
+                    report['restore_error'] = str(exc)
             try:
                 native.unblock()
                 report['input_blocked'] = False
@@ -380,7 +460,14 @@ def execute(request, native, indicator, publish):
     return report
 
 
-def watchdog(parent_pid, timeout_ms, done):
+def watchdog(parent_pid, timeout_ms, done, cleanup=None):
+    def terminate(code):
+        try:
+            if cleanup:
+                cleanup()
+        finally:
+            os._exit(code)
+
     kernel = ctypes.WinDLL('kernel32', use_last_error=True)
     kernel.OpenProcess.argtypes = [wt.DWORD, wt.BOOL, wt.DWORD]
     kernel.OpenProcess.restype = wt.HANDLE
@@ -388,14 +475,14 @@ def watchdog(parent_pid, timeout_ms, done):
     kernel.CloseHandle.argtypes = [wt.HANDLE]
     parent = kernel.OpenProcess(0x100000, False, parent_pid)  # SYNCHRONIZE
     if not parent:
-        os._exit(125)
+        terminate(125)
     deadline = time.monotonic() + timeout_ms / 1000
     try:
         while not done.wait(0.02):
             if time.monotonic() >= deadline:
-                os._exit(124)
+                terminate(124)
             if kernel.WaitForSingleObject(parent, 0) != 258:  # only WAIT_TIMEOUT means alive
-                os._exit(125)
+                terminate(125)
     finally:
         kernel.CloseHandle(parent)
 
@@ -406,7 +493,11 @@ def worker():
     request = json.loads(sys.stdin.buffer.read().decode('utf-8'))
     validate(request['steps'], request['reason'], request['timeout_ms'], True)
     done = threading.Event()
-    threading.Thread(target=watchdog, args=(request['parent_pid'], request['timeout_ms'], done), daemon=True).start()
+    native = None
+    def cleanup():
+        if native is not None:
+            native.release_mouse(stop=True)
+    threading.Thread(target=watchdog, args=(request['parent_pid'], request['timeout_ms'], done, cleanup), daemon=True).start()
     from takeover_indicator import ScreenIndicator
     native = NativeInput(request['hwnd'], request['pid'])
     indicator = ScreenIndicator(request['hwnd'], request['reason'], request['timeout_ms'])

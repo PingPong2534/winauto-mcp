@@ -304,7 +304,8 @@ allow_takeover=True and a nonempty single-line reason, at most 120 characters.
 Use it for focus-dependent suggestion boxes, actual hover, missing scroll
 patterns or key navigation. It never runs implicitly from a background tool.
 
-Allow 1..20 steps: click(x,y,button="left"|"right"), hover(x,y,dwell_ms=500),
+Allow 1..20 steps: click(x,y,button="left"|"right"),
+drag(x1,y1,x2,y2,button="left"|"right",duration_ms=500), hover(x,y,dwell_ms=500),
 scroll(x,y,clicks), type(text,replace=False), key(keys=[...]), wait(ms), and one
 optional final capture(region=[x1,y1,x2,y2]). Step objects use the `do` field.
 Coordinates are client-relative; pointer points must hit the target or owned
@@ -312,7 +313,10 @@ popup. Capture regions must be wholly inside the client. Positive scroll clicks
 send upward wheel notches; negative scrolls downward, as with UIA scroll.
 Wait/dwell is 0..1500 ms, wheel clicks -20..20, text at most 2000 characters.
 Keys: enter/tab/escape/arrows/home/end/backspace/delete, ctrl/shift/alt, a-z, 0-9;
-1..4 unique lowercase names form one chord. No held key/button or drag step.
+1..4 unique lowercase names form one chord. Drag duration is 100..1500 ms;
+its requested time counts toward the timeout budget. Endpoints must differ.
+The path is a straight line within the attached window/owned popup. No cross-app
+drop, modifiers or held key/button between steps/calls are exposed.
 Real type inserts at the physical caret; replace sends Ctrl+A first. It does
 not verify ValuePattern readback. Inspect the actual focus and outcome.
 
@@ -332,10 +336,27 @@ Returns JSON report plus a fresh visible-client PNG if final capture and batch
 succeed. Inspect ok/completed_steps/stopped_at_step/steps/phase/error and
 restoration fields. Runtime failures and watchdog exits return ok=false;
 confirmed steps are retained and an interrupted step can have unknown outcome.
+Inspect `mouse_buttons_released`: normal cleanup releases tracked buttons before
+restoring cursor/focus. Watchdog cleanup attempts the same button-ups; a forced
+worker exit cannot confirm release and returns null for that field.
 No rollback or stale capture. Capture occurs before release so a transient
 popup is visible where it falls within the client. The normal UIA seen-image
 cache/logical target is cleared afterwards; obtain a new background capture.
 Load [temporary-control.md](temporary-control.md) for mode selection/recovery.
+
+### `drag`
+
+`drag(x1,y1,x2,y2,button="left",force=False,keep_cursor=False,duration_ms=500,
+reason="",timeout_ms=3000,allow_takeover=False)` performs a real click-drag only
+with `allow_takeover=True` and a nonempty single-line reason (max 120 characters).
+It uses the foreground worker's orange announcement, input gate, Escape cancel,
+ownership checks and watchdog. Client-pixel points/path must belong to the
+attached window/owned popup; left/right buttons, duration 100..1500 ms and timeout
+1000..8000 ms. Defaults refuse; force does not authorize input and keep_cursor
+does not disable restoration. Returns a foreground JSON report with no image.
+Prefer `set_value` for a supported numeric range. For drag plus visual evidence,
+use a foreground_steps drag and final capture. Background run_steps still rejects
+drag. Load [temporary-control.md](temporary-control.md#click-drag) before use.
 
 ## Unsupported and compatibility tools
 
@@ -347,11 +368,6 @@ them as an attempted workaround for missing semantic patterns.
 `hover(x,y,dwell_ms=700,force=False)` always refuses real hover; no cursor moves.
 Use exposed UIA state/help text where sufficient, or an explicit hover step in
 foreground_steps when takeover is permitted. `force` cannot enable this tool.
-
-### `drag`
-
-`drag(x1,y1,x2,y2,button="left",force=False,keep_cursor=False)` refuses gestures.
-Use `set_value` for a supported numeric range; arbitrary drag/drop is unavailable.
 
 ### `press_key`
 
