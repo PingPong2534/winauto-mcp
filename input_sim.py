@@ -118,12 +118,20 @@ def _at_point(hwnd, x, y, interactive=False):
             # Resolve clicks to its enclosing control, not that Text leaf.
             if interactive and wrapper.element_info.control_type not in uia.INTERACTIVE_TYPES:
                 continue
+            if interactive and wrapper.element_info.control_type in ("ListItem", "TreeItem") \
+                    and not any(uia.pattern(wrapper, name) is not None for name in
+                                ("selection_item", "invoke", "expand_collapse", "toggle")):
+                continue
             candidates.append(((right - left) * (bottom - top), wrapper))
     if not candidates:
         if interactive:
             unsupported("clicking a point without an interactive UIA control")
         raise ValueError("no UIA element at this point in the attached window")
     # Desktop.from_point() would find the covering app instead.
+    # Preorder visits the child after its container; equal bounds must activate
+    # that nested control rather than the ListItem's selection pattern.
+    if interactive:
+        return min(reversed(candidates), key=lambda item: item[0])[1]
     return min(candidates, key=lambda item: item[0])[1]
 
 
@@ -149,7 +157,8 @@ def _activate(hwnd, wrapper):
     if kind == "CheckBox" and toggle is not None:
         toggle.Toggle()
         action = "toggled"
-    elif kind in ("RadioButton", "ListItem", "TreeItem", "TabItem") and selection is not None:
+    elif kind in ("RadioButton", "ListItem", "TreeItem", "TabItem") and selection is not None \
+            and not (kind == "ListItem" and invoke is not None):
         selection.Select()
         action = "selected"
     elif invoke is not None:
