@@ -1,6 +1,6 @@
 # Tool reference
 
-This catalog covers all 35 tools in the hybrid UIA/temporary foreground backend. Names are unqualified MCP
+This catalog covers all 36 tools in the hybrid UIA/temporary foreground backend. Names are unqualified MCP
 tool names; resolve the client's namespace. Signatures show defaults, not
 executable client functions. Omitted selectors default to `None`.
 Use current app observations for handles, IDs and coordinates.
@@ -127,6 +127,29 @@ provider-defined small steps. The return text describes scrolling, not an
 exact resulting position; inspect the newly visible content. `keep_cursor` is ignored.
 
 ## Sets, scripts and presence
+
+### `guarded_steps`
+
+`guarded_steps(steps, vision_backend="auto", timeout_ms=10000, capture_final=False)`
+executes 1-40 existing controls sequentially, binding runtime identities before
+any mutation. Steps: `read`, `click_element`, `type(text, replace=False)`,
+`set_value(value)`, `click(x,y)`. Non-coordinate steps require explicit selectors.
+Optional `before` and `expect` compare exact read_element properties; `wait_ms`
+(0-5000) polls expect without replay. A coordinate click requires `guard`.
+
+`guard={region:[x1,y1,x2,y2], threshold:10, max_changed_ratio:0, ignore_regions:[]}`
+checks fresh pixels against a caller-observed reference fixed before execution.
+Auto prefers OpenCV when available, otherwise Pillow. Missing baseline,
+capture failure, changed region, geometry or UIA target/state stops the batch.
+No screenshot cost on semantic-only success; no physical-input fallback.
+
+Report: `ok`, `status`, `completed_steps`, `completed_actions`, `stopped_at_step`,
+`steps` with `action_outcome` (not_attempted/performed/unknown), `capture_count`,
+`elapsed_ms`. On area_changed, the pending action is not attempted and the report
+recommends capture_screen, with fresh stop evidence/crop offset when available.
+Completed or unknown mutations must be inspected before retry. Deadline is
+cooperative between provider calls. Load [hybrid-automation.md](hybrid-automation.md)
+for property schema, guard baselines, routing and recovery.
 
 ### `control_set`
 

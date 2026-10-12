@@ -1,5 +1,25 @@
 # Status: UIA and bounded temporary control
 
+## Guarded hybrid batches (2026-10-12)
+
+- Added `guarded_steps` (36 tools): shared UIA preflight, bound identities,
+  fresh state/ancestry checks, optional immutable observed-image guards,
+  bounded expectation polling and explicit partial-action outcomes.
+- OpenCV is preferred for region comparisons when installed; Pillow provides
+  capture/crop handling and an equivalent comparison fallback. No cached-image
+  fallback or implicit physical-input takeover in guarded batches.
+- Call-local COM cycles are collected on the caller's initialized apartment;
+  Python GC state is restored after the batch.
+- Full regression: 90 tests passed, including owned covered-window UIA,
+  state/visual stops, real replacement/reparenting, backend parity, native
+  isolated Codex/Claude installations and real stdio discovery of 36 tools.
+- Latest local benchmark: three semantic actions, 7 repetitions, legacy
+  run_steps(delay_ms=0) median 1038.825 ms / 4 captures; guarded_steps median
+  756.971 ms / 0 captures. Wall time includes COM cleanup. Workload-specific,
+  excludes AI/network latency. Run tests/benchmark_hybrid.py to remeasure.
+
+## Earlier validation
+
 Verified on 2026-10-11 in `feat/pywinauto-backend`. Background migration was
 verified on 2026-10-08; temporary foreground control is the subsequent addition.
 

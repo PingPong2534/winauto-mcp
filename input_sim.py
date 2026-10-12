@@ -65,7 +65,7 @@ def _remember(hwnd, wrapper):
     _targets[hwnd] = uia.runtime_id(wrapper)
 
 
-def _find(hwnd, name=None, automation_id=None, selected=False, editable=False, target_id=None):
+def _find(hwnd, name=None, automation_id=None, selected=False, editable=False, target_id=None, candidates=None):
     if name is not None and not name.strip():
         raise ValueError("name must not be empty")
     if automation_id is not None and not automation_id.strip():
@@ -77,7 +77,7 @@ def _find(hwnd, name=None, automation_id=None, selected=False, editable=False, t
     remembered = target_id
     if remembered is None and selected and name is None and automation_id is None:
         remembered = _targets.get(hwnd)
-    for wrapper in uia.walk(uia.root_wrapper(hwnd), strict=True):
+    for wrapper in (candidates if candidates is not None else uia.walk(uia.root_wrapper(hwnd), strict=True)):
         info = wrapper.element_info
         if remembered is not None and uia.runtime_id(wrapper) != remembered:
             continue
@@ -243,43 +243,53 @@ def type_text(text, hwnd=None, name=None, automation_id=None, replace=False):
 def read_element(hwnd, name=None, automation_id=None):
     with _lock, uia.com_session():
         wrapper = _find(hwnd, name, automation_id)
-        result = uia.describe(wrapper, hwnd)
-        value = uia.pattern(wrapper, "value")
-        if value is not None:
-            if not wrapper.element_info.element.CurrentIsPassword:
-                result["value"] = value.CurrentValue
-            result["read_only"] = bool(value.CurrentIsReadOnly)
-        for iface_name, prop, key in (
-            ("toggle", "CurrentToggleState", "toggle_state"),
-            ("selection_item", "CurrentIsSelected", "selected"),
-            ("range_value", "CurrentValue", "range_value"),
-        ):
-            iface = uia.pattern(wrapper, iface_name)
-            if iface is not None:
-                result[key] = getattr(iface, prop)
-        return result
+        return _read_from(hwnd, wrapper)
+
+
+def _read_from(hwnd, wrapper):
+    """Read a resolved control; callers own the lock and COM session."""
+    result = uia.describe(wrapper, hwnd)
+    value = uia.pattern(wrapper, "value")
+    if value is not None:
+        if not wrapper.element_info.element.CurrentIsPassword:
+            result["value"] = value.CurrentValue
+        result["read_only"] = bool(value.CurrentIsReadOnly)
+    for iface_name, prop, key in (
+        ("toggle", "CurrentToggleState", "toggle_state"),
+        ("selection_item", "CurrentIsSelected", "selected"),
+        ("range_value", "CurrentValue", "range_value"),
+    ):
+        iface = uia.pattern(wrapper, iface_name)
+        if iface is not None:
+            result[key] = getattr(iface, prop)
+    return result
 
 
 def set_value(hwnd, value, name=None, automation_id=None):
     ensure_input_allowed(hwnd)
     with _lock, background_action(hwnd), uia.com_session():
         wrapper = _find(hwnd, name, automation_id)
-        _actionable(wrapper)
-        iface = uia.pattern(wrapper, "range_value")
-        if iface is None:
-            unsupported("setting a numeric value without RangeValuePattern")
-        numeric = float(value)
-        if not math.isfinite(numeric) or not iface.CurrentMinimum <= numeric <= iface.CurrentMaximum:
-            raise ValueError(f"value must be between {iface.CurrentMinimum} and {iface.CurrentMaximum}")
-        if iface.CurrentIsReadOnly:
-            raise ValueError("target numeric control is read-only")
-        rect = _interaction_rect(hwnd, wrapper)
-        iface.SetValue(numeric)
-        actual = iface.CurrentValue
-        if actual != numeric:
-            raise RuntimeError(f"value readback differs: expected {numeric}, got {actual}")
-        _show_interaction(hwnd, rect)
-        return {"value": actual, "verified": True, "backend": "pywinauto-uia"}
+        return _set_range_into(hwnd, wrapper, value)
+
+
+def _set_range_into(hwnd, wrapper, value):
+    """Set a resolved range; callers own input permission, lock and COM session."""
+    _actionable(wrapper)
+    iface = uia.pattern(wrapper, "range_value")
+    if iface is None:
+        unsupported("setting a numeric value without RangeValuePattern")
+    numeric = float(value)
+    if not math.isfinite(numeric) or not iface.CurrentMinimum <= numeric <= iface.CurrentMaximum:
+        raise ValueError(f"value must be between {iface.CurrentMinimum} and {iface.CurrentMaximum}")
+    if iface.CurrentIsReadOnly:
+        raise ValueError("target numeric control is read-only")
+    rect = _interaction_rect(hwnd, wrapper)
+    iface.SetValue(numeric)
+    actual = iface.CurrentValue
+    if actual != numeric:
+        raise RuntimeError(f"value readback differs: expected {numeric}, got {actual}")
+    _show_interaction(hwnd, rect)
+    return {"value": actual, "verified": True, "backend": "pywinauto-uia"}
 
 
 def scroll_in_window(hwnd, client_x, client_y, clicks, keep_cursor=False):

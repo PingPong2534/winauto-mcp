@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 
 ROOT = Path(__file__).resolve().parents[1]
 CLIENTS = ('codex', 'claude-code')
-REQUIRED_TOOLS = {'list_windows', 'attach_window', 'get_elements', 'read_element', 'control_set', 'foreground_steps'}
+REQUIRED_TOOLS = {'list_windows', 'attach_window', 'get_elements', 'read_element', 'control_set', 'foreground_steps', 'guarded_steps'}
 
 
 def read_json(path):
@@ -101,7 +101,7 @@ def build_bundle(repo, state, plan, python):
     skill = plugin / 'skills/winauto-mcp'
     shutil.copytree(source, skill, dirs_exist_ok=True)
     common = {'name': plan['name'], 'version': version,
-              'description': 'Windows UIA and bounded temporary foreground control with all 35 tools.',
+              'description': 'Windows UIA, guarded hybrid batches and bounded foreground control with all 36 tools.',
               'author': {'name': 'winauto-mcp contributors'}}
     codex = dict(common, skills='./skills/', mcpServers='./.mcp.json',
                  interface={'displayName': 'WinAuto MCP',

@@ -31,14 +31,14 @@ release_control keeps attachment/state and only hides the decoration.
 Integrity refusal compares known target/server levels, unless the server has
 UIAccess. An unknown integrity level does not itself refuse an action.
 
-## 35 MCP tools
+## 36 MCP tools
 
 | Group | Tools | Contract |
 | --- | --- | --- |
 | Attachment | `list_windows`, `attach_window`, `detach_window` | Background target selection with a green client outline; take_control=True refused |
 | Inspection | `capture_screen`, `screenshot`, `capture_region`, `get_elements`, `read_element` | Client pixels/tree/state; read_element hides password text |
 | UIA actions | `click`, `click_element`, `type_text`, `scroll`, `set_value` | Semantic patterns only; enabled/read-only/integrity checks |
-| Waits/scripts | `wait_for`, `run_steps`, `control_set` | Element presence/fixed wait steps; prevalidated batches; control_set binds one control and returns only its crop |
+| Waits/scripts | `wait_for`, `run_steps`, `control_set`, `guarded_steps` | Presence/legacy checkpoints; single-control crop; identity-bound multi-target state/pixel guards |
 | Temporary takeover | `foreground_steps` | Explicit real-input batch, visible screen-edge announcement, short-lived input hooks, Esc cancel, 1..8-second watchdog, no renewal |
 | Pixel/cache helpers | `locate_in_region`, `snapshot`, `diff_since_snapshot`, `remember_location`, `recall_location` | Freshness and pixel evidence; cache reverified |
 | Debug/evidence | `highlight`, `release_control`, `history`, `replay_frame` | Explicit visual overlay and journal; replay is downscaled |
@@ -180,5 +180,6 @@ or refusal; other covering windows still cause a refusal.
 exercise real Value/Invoke/Toggle/RangeValue/Scroll patterns under a cover,
 refusals, readback, script/journal behavior, worker COM and STA hosting. Real
 stdio tests initialize the server from a different directory and verify all
-35 tool names. Historical probes in `tests/legacy` are excluded and require
+36 tool names, including conditional UIA/Pillow/OpenCV guarded batches.
+Historical probes in `tests/legacy` are excluded and require
 the former backend revision.

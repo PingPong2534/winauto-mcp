@@ -47,6 +47,7 @@ from mcp.server.mcpserver import Image, MCPServer
 
 import heap
 import control_sets
+import guarded_batch
 import foreground_control
 import input_sim
 import integrity
@@ -99,6 +100,11 @@ mcp = MCPServer(
         "step syntax first and journals each step; control capabilities are "
         "checked during execution. Only an initial coordinate "
         "click before other mutations has a stale check, so keep scripts short and use check steps. "
+        "For several existing controls prefer guarded_steps: it binds UIA identities, "
+        "checks before/expect state, and optionally checks each action region against "
+        "an observed baseline using Pillow/OpenCV. Semantic-only success needs no screenshots. "
+        "Coordinate steps require observed guards. area_changed stops before the action; "
+        "inspect capture_screen and replan only unfinished steps. No physical fallback. "
         "Use get_elements/read_element or a fresh screenshot to verify an action. "
         "history and replay_frame provide evidence; replay images are "
         "downscaled and must not be used for aiming. Reading an elevated "
@@ -990,6 +996,37 @@ def run_steps(steps: list[dict], delay_ms: int = 120, stop_on_error: bool = True
         ),
     }
     return [json.dumps(summary, ensure_ascii=False), *[img for _, img in images]]
+
+
+@tool
+def guarded_steps(steps: list[dict], vision_backend: str = "auto",
+                  timeout_ms: int = 10000, capture_final: bool = False):
+    """Run 1-40 existing UIA targets with identity binding and stop-on-change guards.
+    do: read, click_element, type(text, replace=False), set_value(value), click(x,y).
+    Every non-coordinate step requires name/automation_id. Optional before/expect
+    are exact subsets of read_element properties; wait_ms (0-5000) polls expect,
+    never replays actions. guard={region:[x1,y1,x2,y2], threshold:10,
+    max_changed_ratio:0, ignore_regions:[]} compares against the newest caller-seen
+    image fully covering that region, fixed before the batch. Coordinate clicks
+    require guards and still use UIA patterns, not physical input. Unseen regions,
+    changed pixels, missing/disabled/replaced controls and failed captures stop.
+    auto prefers OpenCV when installed, otherwise Pillow. timeout_ms
+    (1-30000) is cooperative between provider calls, not a hard UIA call timeout.
+    No screenshot cost for semantic-only success unless capture_final=True.
+    Read report ok/status/completed_actions/action_outcome before retrying.
+    area_changed recommends capture_screen and includes fresh stop evidence when
+    available; completed actions are never rolled back. Navigation needs a new plan.
+    """
+    hwnd = _require_attached()
+    report, frame, rect = guarded_batch.run(hwnd, steps, _state["seen"],
+                                           vision_backend, timeout_ms, capture_final)
+    result = [json.dumps(report, ensure_ascii=False)]
+    if frame is not None:
+        rect = rect or (0, 0, *frame.size)
+        _mark_seen(frame, rect)
+        journal_frame(frame)
+        result.append(Image(data=to_png(frame.crop(rect)), format="png"))
+    return result
 
 
 @tool

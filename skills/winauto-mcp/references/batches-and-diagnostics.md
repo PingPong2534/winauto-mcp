@@ -2,7 +2,10 @@
 
 ## Multi-control scripts
 
-Use `run_steps` for short sequences spanning multiple known controls. Use
+Prefer `guarded_steps` for conditional multi-target UIA plans and observed-image
+guards; load [hybrid-automation.md](hybrid-automation.md). It can verify state
+without images and never substitutes cached pixels for a failed guard capture.
+Use legacy `run_steps` when scroll or capture/check checkpoints are needed. Use
 `control_set` for a single control with a required fresh final crop.
 
 ```python
@@ -68,6 +71,8 @@ read_element(automation_id="saveStatus")
 3. `run_steps` attempts before/after frames per executed step. `control_set`
    records click/type results as text and an after-frame for successful capture;
    do not expect before/after images for its mutations.
+   `guarded_steps` journals state/action/guard results as text; it captures only
+   visual guards, optional final evidence and available failure evidence.
 4. Replay images are downscaled history, not current coordinate references.
    Journals truncate arguments/results, retain five session folders under
    `%TEMP%\winauto-mcp`, and keep 300 records in memory.

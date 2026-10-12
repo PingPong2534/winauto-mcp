@@ -1,0 +1,55 @@
+{
+  "pixel_comparison": [
+    {
+      "size": [
+        80,
+        40
+      ],
+      "pillow_median_ms": 0.322,
+      "opencv_median_ms": 0.157
+    },
+    {
+      "size": [
+        400,
+        300
+      ],
+      "pillow_median_ms": 3.323,
+      "opencv_median_ms": 1.974
+    },
+    {
+      "size": [
+        1280,
+        720
+      ],
+      "pillow_median_ms": 31.949,
+      "opencv_median_ms": 25.805
+    }
+  ],
+  "owned_window_three_actions": {
+    "run_steps": {
+      "median_ms": 1038.825,
+      "captures_per_batch": [
+        4,
+        4,
+        4,
+        4,
+        4,
+        4,
+        4
+      ]
+    },
+    "guarded_steps": {
+      "median_ms": 756.971,
+      "captures_per_batch": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  },
+  "scope": "local medians; excludes AI/network latency; no universal speed claim"
+}

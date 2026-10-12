@@ -1,6 +1,6 @@
 ---
 name: winauto-mcp
-description: "Install, control and verify Windows desktop apps with winauto MCP on Codex or Claude Code. Use background UIA by default and explicit bounded foreground batches for focus-dependent suggestion boxes, click-drag, hover, scrolling or keys. Includes all 35 tools, capture/cache/diff, journal, .NET heap diagnostics and partial-failure recovery. Report observed MCP bugs and blocking limitations to its GitHub repository. Requires the connected winauto MCP server for app control."
+description: "Install, control and verify Windows apps through WinAuto MCP. Choose UIA state checks, guarded multi-control batches with Pillow/OpenCV, or explicitly permitted short foreground sequences for custom controls and focus-dependent interactions. Includes capture/cache, journal and partial-failure recovery. Requires the connected WinAuto MCP server."
 ---
 
 # WinAuto MCP
@@ -30,12 +30,20 @@ runtime + skill + enabled MCP connection + declared required plugins together.
 | --- | --- |
 | One supported semantic action or state read | Individual UIA tool; background by default |
 | One control: click/type and fresh final control crop | `control_set` |
-| Several known controls using semantic actions | `run_steps`; check its capture limits in the batch reference |
+| Several existing controls; conditional actions or expected state | `guarded_steps`; load [references/hybrid-automation.md](references/hybrid-automation.md) |
+| Legacy scripts needing scroll, fixed wait or checkpoint comparison | `run_steps`; check its capture limits in the batch reference |
 | Focus-dependent suggestions, click-drag, actual hover, physical keys or a scroll surface without a usable UIA pattern | Explicit `foreground_steps`, only when temporary takeover is permitted; `drag` also accepts explicit opt-in |
 
 Prefer UIA whenever it performs the requested app behavior. UIA text writes
 change the value without placing a physical caret or reproducing ordinary key
 events. Successful value readback alone does not prove a suggestion list opened.
+Plan independent existing targets together and execute sequentially in one
+batch. Use UIA identity, enabled/capability checks and `before`/`expect` when
+these establish readiness and outcome. Add observed-image guards only where
+visual context matters. Semantic-only `guarded_steps` success takes no images;
+guarded coordinates require a previously observed region. Keep the baseline
+fixed until the batch returns. On `area_changed`, inspect fresh evidence or
+`capture_screen` and replan unfinished actions; never auto-accept a new baseline.
 For focus-dependent interactions, first load
 [references/temporary-control.md](references/temporary-control.md). Plan the
 entire sequence before takeover; keep actions and transient capture in one short
@@ -134,7 +142,9 @@ when navigation or layout changes make earlier observations unreliable. For
 asynchronous results, use bounded `read_element` checks or `wait_for(name)`
 followed by a fresh read/capture. `wait_for` only checks name presence and may
 return multiple matches; it does not prove uniqueness, enabled state or success.
-There is no pixel-stability wait tool or script step.
+`guarded_steps` can poll an expected state on a bound existing control without
+repeating an action. Pixel unchanged is a baseline check, not proof of readiness
+or business success. There is no standalone pixel-stability wait tool.
 
 ## Coordinates and failures
 
@@ -188,7 +198,7 @@ report and explain the blocker; never claim an issue was opened without proof.
 
 ## Feature reference routing
 
-All 35 registered tools, including refused and compatibility operations, have
+All 36 registered tools, including refused and compatibility operations, have
 signatures, usage and result guidance in
 [references/tools.md](references/tools.md). Load the relevant section when
 using a feature beyond the core workflow or checking an unfamiliar parameter:

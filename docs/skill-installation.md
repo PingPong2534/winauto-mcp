@@ -108,7 +108,7 @@ Example request:
 > "Customer name", inspect its text controls, replace the name with "Alice",
 > and return a crop of the textbox. Inspect the report before retrying a write.
 
-The skill covers all 35 tools with [the tool reference](../skills/winauto-mcp/references/tools.md)
+The skill covers all 36 tools with [the tool reference](../skills/winauto-mcp/references/tools.md)
 and [batch recovery](../skills/winauto-mcp/references/batches-and-diagnostics.md).
 
 ## Update, repair and diagnosis

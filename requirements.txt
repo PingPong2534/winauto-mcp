@@ -4,3 +4,4 @@ pywinauto>=0.6.9,<0.7
 mss
 Pillow
 psutil
+opencv-python-headless>=4.10,<5

@@ -22,7 +22,7 @@ The server uses MCP stdio with absolute paths to the venv's `python.exe` and
 `pywinauto>=0.6.9,<0.7`, with MCP SDK 2.x.
 
 For agents using this MCP, the repository includes the
-[WinAuto MCP skill](skills/winauto-mcp/SKILL.md), covering all 35 tools with
+[WinAuto MCP skill](skills/winauto-mcp/SKILL.md), covering all 36 tools with
 UIA targeting, efficient control sets, capture/cache/diff, journal and heap
 diagnostics, and verified recovery. See
 [skill installation](docs/skill-installation.md) for Codex installation and
@@ -126,6 +126,19 @@ of the control's bounds at the interaction, not a live UIA tracker after layout 
   covered, capture refuses to return another app's pixels; it never raises the
   target. UIA reads/actions can still be used independently of capture.
 
+## Conditional hybrid automation
+
+Use `guarded_steps` for several existing controls. The server binds their UIA
+identities before mutations, checks `before`/`expect` state, and can compare each
+action's region with an observed baseline through Pillow or OpenCV. Semantic-only
+success takes no screenshots; visual guards use fresh images and stop before a
+changed target. Results distinguish completed actions from unknown outcomes.
+No automatic physical-input fallback occurs. Navigation requires a new plan.
+
+See [hybrid planning and examples](skills/winauto-mcp/references/hybrid-automation.md).
+Run `.venv\Scripts\python.exe tests\benchmark_hybrid.py` for repeatable local
+pixel and owned-window batch measurements. These exclude AI/network round trips.
+
 ## Temporary foreground control
 
 For focus-dependent suggestion boxes, pointer hover, real scrolling or keys,
@@ -161,7 +174,7 @@ and [research/design](docs/temporary-control.md).
 
 ## Other tools
 
-The 35 tools also include cropped screenshots, pixel location/cache helpers,
+The 36 tools also include cropped screenshots, pixel location/cache helpers,
 element-presence waits, snapshots/diffs, scripted steps, journal replay,
 debug highlights and .NET heap snapshots. See [HOWTOUSE.md](HOWTOUSE.md) and
 [docs/SPEC.md](docs/SPEC.md) for contracts. Heap tools need `dotnet-gcdump` and
