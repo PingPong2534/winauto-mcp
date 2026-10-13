@@ -9,10 +9,19 @@
 - Owned native probe completed Shift+click, Ctrl+Shift+drag, Return, Escape and
   fresh crop: 5/5 steps, input gate 1375 ms, buttons/keys released and cursor/focus
   restored. Native Close and repeated GDI capture regressions passed separately.
-- Exact Unity/Edge acceptance for #11/#13/#14 remains open. See
-  [issue review and reproduction](issue-fixes-20261013.md) for evidence boundaries.
+- Follow-up standalone Unity UI Toolkit/DX12 and Edge WebGL fixtures verify
+  Return/Escape callbacks, visible Game View pixels and click/capture cleanup.
+  Added bounded activation acknowledgement, title-free lost-focus diagnostics
+  and worker exit checkpoints preserving confirmed release. The release Unity
+  fixture avoids profiler/debugger listeners and firewall prompts. See
+  [issue review and reproduction](issue-fixes-20261013.md) for original-project
+  limitations and the reusable MCP stdio runner.
 - Final full suite: 110/110 passed, no failures/skips; pip check, skill validation
   and CRLF-aware diff check passed. Actual stdio still discovers 36 tools.
+- Follow-up suite: 114/115 in the full run; the existing two-frame crop
+  comparison failed. Focused rerun passed, followed by 32/32 background
+  regressions. Native Edge/player/Editor fixtures passed separately. This is
+  separate-run evidence, not a clean 115/115 single-run claim.
 
 ## Guarded hybrid batches (2026-10-12)
 
@@ -104,7 +113,8 @@ verified on 2026-10-08; temporary foreground control is the subsequent addition.
 - Sampled path checks precede button-down; ownership/foreground are rechecked
   during movement. Tracked mouse-ups run before cursor/focus restoration on
   success/failure/Escape. Watchdog attempts release before exit; forced worker
-  termination cannot confirm release and reports mouse_buttons_released=null.
+  termination reports mouse_buttons_released=null unless a durable released
+  report already confirmed cleanup (see the follow-up worker exit contract).
 - Five new foreground regressions cover drag timing/budget/opt-in, held-button
   motion and cancellation, covered paths, partial SendInput, release failure
   and watchdog cleanup. Transport checks the actual drag MCP opt-in schema.

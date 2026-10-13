@@ -192,6 +192,14 @@ and reserves 300 ms for cleanup; `capture_phase` identifies the stalled phase.
 Completed input persists when capture fails. Unity/Edge-specific response still
 requires target-app verification.
 
+Worker failures expose `worker_exit_phase`; `release_confirmed=true` retains
+cleanup acknowledgements if the process fails only after release. Lost-focus
+diagnostics include HWND/PID/class without titles. Activation waits up to 200 ms
+for the target's cross-thread acknowledgement without retrying lost focus.
+The opt-in `tests/probe_app_interop.py` tests isolated Edge WebGL and Unity
+UI Toolkit/DX12 fixtures through real MCP stdio. Its release player disables
+profiler/debugger listeners, avoiding Development Player firewall prompts.
+
 The 36 tools also include cropped screenshots, pixel location/cache helpers,
 element-presence waits, snapshots/diffs, scripted steps, journal replay,
 debug highlights and .NET heap snapshots. See [HOWTOUSE.md](HOWTOUSE.md) and

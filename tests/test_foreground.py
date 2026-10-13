@@ -95,6 +95,102 @@ class ForegroundTests(unittest.TestCase):
         self.assertFalse(report['input_blocked'])
         self.assertTrue(report['mouse_buttons_released'])
 
+    def test_activation_waits_for_cross_thread_acknowledgement_without_retry(self):
+        native = object.__new__(control.NativeInput)
+        native.hwnd, native.pid = 123, 456
+        native.gui, native.process, native.windows = Mock(), Mock(), Mock()
+        native.gui.IsWindow.return_value = True
+        native.gui.IsIconic.return_value = False
+        native.gui.IsWindowVisible.return_value = True
+        native.process.GetWindowThreadProcessId.return_value = (7, 456)
+        foreground = [999]
+        native.gui.GetForegroundWindow.side_effect = lambda: foreground[0]
+        native.belongs = lambda hwnd: hwnd == 123
+        native.gui.SendMessageTimeout.side_effect = lambda *args: foreground.__setitem__(0, 123)
+        native.guard = Mock()
+        native.activate()
+        native.gui.SetForegroundWindow.assert_called_once_with(123)
+        native.gui.SendMessageTimeout.assert_called_once_with(123, 0, 0, 0, 2, 200)
+        native.guard.assert_called_once()
+
+    def test_lost_foreground_diagnostic_omits_title_and_stops_input(self):
+        native = object.__new__(control.NativeInput)
+        native.hwnd, native.pid, native.gate = 123, 456, None
+        native.gui, native.process, native.windows = Mock(), Mock(), Mock()
+        native.gui.IsWindow.return_value = True
+        native.gui.IsIconic.return_value = False
+        native.gui.IsWindowVisible.return_value = True
+        native.gui.GetForegroundWindow.return_value = 999
+        native.gui.GetClassName.return_value = 'SyntheticCover'
+        native.process.GetWindowThreadProcessId.side_effect = lambda hwnd: (7, 456 if hwnd == 123 else 888)
+        native.belongs = lambda hwnd: hwnd == 123
+        with self.assertRaisesRegex(RuntimeError, "hwnd=999, pid=888, class='SyntheticCover'"):
+            native.guard()
+        native.gui.GetWindowText.assert_not_called()
+        native.gui.SetForegroundWindow.assert_not_called()
+
+    def test_worker_timeout_preserves_only_durable_confirmed_cleanup(self):
+        for phase in ('initializing', 'activating', 'controlling', 'restoring', 'released'):
+            for blocked in (True, False):
+                with self.subTest(phase=phase, blocked=blocked):
+                    report = control.worker_exit_report({'ok': True, 'phase': phase,
+                        'completed_steps': 2, 'input_blocked': blocked,
+                        'keys_released': True, 'mouse_buttons_released': True,
+                        'focus_restored': True, 'cursor_restored': True}, 124)
+                    confirmed = phase == 'released' and not blocked
+                    self.assertFalse(report['ok'])
+                    self.assertEqual(report['completed_steps'], 2)
+                    self.assertEqual(report['worker_exit_phase'], phase)
+                    self.assertEqual(report['release_confirmed'], confirmed)
+                    self.assertEqual(report['input_released_by_worker_exit'], not confirmed)
+                    self.assertIs(report['keys_released'], True if confirmed else None)
+                    self.assertIs(report['mouse_buttons_released'], True if confirmed else None)
+                    self.assertTrue(report['timed_out'])
+
+    def test_cleanup_phase_journal_failure_cannot_prevent_input_release(self):
+        native, indicator = Mock(), Mock()
+        def publish(report):
+            if report['phase'] in ('releasing_inputs', 'restoring', 'unblocking', 'closing_indicator'):
+                raise OSError('diagnostic disk unavailable')
+        report = control.execute(self.request(), native, indicator, publish)
+        self.assertTrue(report['ok'])
+        self.assertEqual(report['phase'], 'released')
+        native.release_keys.assert_called_once()
+        native.release_mouse.assert_called_once()
+        native.unblock.assert_called_once()
+        indicator.close.assert_called_once()
+
+    def test_parent_timeout_returns_partial_progress_instead_of_transport_error(self):
+        from contextlib import nullcontext
+        for released in (False, True):
+            with self.subTest(released=released):
+                process = Mock(returncode=-9)
+                def communicate(data=None, timeout=None):
+                    if data is not None:
+                        request = json.loads(data)
+                        report = {'ok': released, 'phase': 'released' if released else 'controlling',
+                            'completed_steps': 1, 'steps': [{'do': 'click', 'ok': True}],
+                            'input_blocked': not released, 'keys_released': released,
+                            'mouse_buttons_released': released}
+                        Path(request['folder'], 'result.json').write_text(json.dumps(report))
+                        raise subprocess.TimeoutExpired('owned worker', timeout)
+                    return b'', b''
+                process.communicate.side_effect = communicate
+                with patch('window_manager.ensure_input_allowed'), \
+                     patch('window_manager.get_pid', return_value=456), \
+                     patch('overlay.hidden_for_capture', nullcontext), \
+                     patch.object(control.subprocess, 'Popen', return_value=process):
+                    report, image = control.run(123, [{'do': 'click', 'x': 1, 'y': 1}], 'Timeout regression',
+                                                allow_takeover=True)
+                process.kill.assert_called_once()
+                self.assertEqual(process.communicate.call_count, 2)
+                self.assertFalse(report['ok'])
+                self.assertTrue(report['parent_timed_out'])
+                self.assertTrue(report['timed_out'])
+                self.assertEqual(report['completed_steps'], 1)
+                self.assertEqual(report['release_confirmed'], released)
+                self.assertIsNone(image)
+
     def native_mouse(self):
         native = object.__new__(control.NativeInput)
         native.held_mouse = 0

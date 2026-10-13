@@ -376,7 +376,12 @@ restoration fields. Runtime failures and watchdog exits return ok=false;
 confirmed steps are retained and an interrupted step can have unknown outcome.
 Inspect `mouse_buttons_released` and `keys_released`: normal cleanup releases
 tracked inputs before restoring cursor/focus. Watchdog cleanup attempts only
-their up events; a forced worker exit cannot confirm release and returns null.
+their up events. A worker exit returns null unless a durable released report
+already confirmed key/button cleanup (`release_confirmed=true`).
+`worker_exit_phase` identifies initialization, activation, action or cleanup
+progress. Lost-focus diagnostics include HWND/PID/class without titles.
+`parent_timed_out=true` identifies a parent deadline; it returns the same
+partial-progress report instead of a transport error.
 Capture dependencies load before the input gate. Optional screen-grab/PNG work
 has a 1 s bound and reserves 300 ms for cleanup; failure retains completed input
 steps. `capture_phase` identifies occlusion_check/dwm_flush/screen_grab/png_encode/

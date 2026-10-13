@@ -63,7 +63,11 @@ secure-desktop action; the tool does not operate there.
 
 [SetForegroundWindow](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setforegroundwindow)
 can be denied. Native UIA SetFocus is also provider-dependent; if neither
-establishes the attached foreground family, abort. SendInput remains subject
+establishes the attached foreground family, abort. A bounded WM_NULL message
+waits up to 200 ms for asynchronous cross-thread activation acknowledgement;
+it never retries an activation request after lost focus. See Microsoft's
+[activation timing explanation](https://devblogs.microsoft.com/oldnewthing/20161118-00/?p=94745/).
+Lost-focus diagnostics identify HWND/PID/class without window titles. SendInput remains subject
 to UIPI and an accepted event count does not prove app success.
 
 ## Reports and practical limits
@@ -82,7 +86,10 @@ Tracked button-ups precede cursor/focus restoration on normal/error cleanup;
 Escape/lost-focus cleanup may emit only those ups without ordinary input guards.
 The watchdog attempts the same release before exit. Forced kill or native input
 failure may leave release unconfirmed; inspect `mouse_buttons_released` (null
-after worker exit), not process termination alone.
+unless a durable released report already confirms cleanup), not process termination alone.
+`worker_exit_phase` records the last checkpoint and `release_confirmed` preserves
+acknowledged release even if post-release COM cleanup subsequently stalls.
+Diagnostic checkpoint write failures cannot prevent key/button/gate release.
 
 Click/drag steps accept distinct ctrl/shift/alt modifiers held through button-up.
 Key steps use scan-code injection and a separate down interval (`hold_ms=80`,
@@ -98,7 +105,11 @@ occlusion_check/dwm_flush/screen_grab/png_encode/verify_and_save/complete. Faile
 capture preserves completed input and returns no image. DWM-cloaked windows are
 excluded from occlusion checks; visible foreign windows remain blockers and are
 identified by HWND/PID/class without titles. Check coverage/geometry again after
-the screen read. Exact Unity/Edge failures still need application-specific retests.
+the screen read. Use the opt-in `tests/probe_app_interop.py` for isolated Unity
+UI Toolkit, DX12 Game View and Edge WebGL verification. The Unity fixture uses
+a release player without profiler/debugger listeners; it requires no firewall
+rule. Browser HTTP is bound to loopback only. Original application content is
+not part of these synthetic fixtures.
 
 Mouse state uses explicit down/motion/up events per Microsoft's
 [MOUSEINPUT contract](https://learn.microsoft.com/en-us/windows/win32/api/winuser/ns-winuser-mouseinput).

@@ -116,6 +116,7 @@ def run(hwnd, steps, reason, timeout_ms=3000, allow_takeover=False):
                'reason': reason, 'timeout_ms': timeout_ms, 'parent_pid': os.getpid()}
     with tempfile.TemporaryDirectory(prefix='winauto-foreground-') as folder:
         request['folder'] = folder
+        parent_timed_out = False
         with hidden_for_capture():  # attachment decoration must not obstruct pointer targeting
             proc = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), '--worker'],
                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -123,6 +124,10 @@ def run(hwnd, steps, reason, timeout_ms=3000, allow_takeover=False):
             try:
                 _, stderr = proc.communicate(json.dumps(request).encode('utf-8'),
                                              timeout=timeout_ms / 1000 + 3)
+            except subprocess.TimeoutExpired:
+                parent_timed_out = True
+                proc.kill()
+                _, stderr = proc.communicate(timeout=2)
             except BaseException:
                 proc.kill()
                 proc.communicate(timeout=2)
@@ -130,19 +135,33 @@ def run(hwnd, steps, reason, timeout_ms=3000, allow_takeover=False):
         report_path = Path(folder) / 'result.json'
         report = json.loads(report_path.read_text(encoding='utf-8')) if report_path.exists() else {
             'ok': False, 'completed_steps': 0, 'steps': []}
-        if proc.returncode or report.get('phase') != 'released':
-            report.update(ok=False, timed_out=proc.returncode == 124,
-                          error=report.get('error', 'worker exited before cleanup completed'),
-                          input_released_by_worker_exit=True,
-                          interrupted_step_outcome='unknown; inspect state before retrying')
-            report.update(input_blocked=False, phase='worker_exited')
-            report['mouse_buttons_released'] = None  # cleanup cannot be confirmed after a crash
-            report['keys_released'] = None
+        if parent_timed_out or proc.returncode or report.get('phase') != 'released':
+            report = worker_exit_report(report, proc.returncode)
+            if parent_timed_out:
+                report.update(timed_out=True, parent_timed_out=True)
             if stderr:
                 report['diagnostic'] = stderr.decode('utf-8', errors='replace')[:1000]
         # A successful capture can precede a failed release; never mislabel it as batch success.
         image = Path(folder) / 'capture.png'
         return report, image.read_bytes() if image.exists() and report.get('ok') else None
+
+
+def worker_exit_report(report, returncode):
+    """Preserve durable cleanup acknowledgements if only post-release work died."""
+    confirmed = (report.get('phase') == 'released' and report.get('input_blocked') is False
+                 and report.get('keys_released') is True and report.get('mouse_buttons_released') is True)
+    report.update(ok=False, timed_out=returncode == 124, worker_returncode=returncode,
+                  worker_exit_phase=report.get('phase', 'initializing'),
+                  release_confirmed=confirmed, input_released_by_worker_exit=not confirmed,
+                  error=report.get('error', 'worker exited after confirmed release' if confirmed
+                                   else 'worker exited before cleanup completed'),
+                  interrupted_step_outcome=('none; worker exited after cleanup was reported' if confirmed
+                                            else 'unknown; inspect state before retrying'))
+    report.update(input_blocked=False, phase='worker_exited')
+    if not confirmed:
+        report['mouse_buttons_released'] = None
+        report['keys_released'] = None
+    return report
 
 
 class _Mouse(ctypes.Structure):
@@ -224,8 +243,14 @@ class NativeInput:
         if self.gui.IsIconic(self.hwnd) or not self.gui.IsWindowVisible(self.hwnd):
             raise RuntimeError('target must be visible and not minimized')
         self.windows.ensure_input_allowed(self.hwnd)
-        if not self.belongs(self.gui.GetForegroundWindow()):
-            raise RuntimeError('foreground left the attached window/owned popup; stopped without reacquiring focus')
+        current = self.gui.GetForegroundWindow()
+        if not self.belongs(current):
+            details = 'none'
+            if current and self.gui.IsWindow(current):
+                details = (f'hwnd={current}, pid={self.process.GetWindowThreadProcessId(current)[1]}, '
+                           f'class={self.gui.GetClassName(current)!r}')
+            raise RuntimeError('foreground left the attached window/owned popup; stopped without reacquiring focus; '
+                               f'foreground={details}')
 
     def block(self):
         if any(self.api.GetAsyncKeyState(n) & 0x8000 for n in range(1, 256)):
@@ -247,6 +272,7 @@ class NativeInput:
         if not self.belongs(self.gui.GetForegroundWindow()):
             try:
                 self.gui.SetForegroundWindow(self.hwnd)
+                self.wait_activation()
             except Exception:
                 pass
         if not self.belongs(self.gui.GetForegroundWindow()):
@@ -255,7 +281,14 @@ class NativeInput:
             import uia_inspect
             with uia_inspect.com_session():
                 uia_inspect.root_wrapper(self.hwnd).element_info.element.SetFocus()
+            self.wait_activation()
         self.guard()  # SetForegroundWindow can be denied; never inject into the old app
+
+    def wait_activation(self):
+        # Cross-thread SetForegroundWindow activation is asynchronous. Wait only
+        # for acknowledgement of the single request, never reacquire lost focus.
+        # WM_NULL is non-mutating; SMTO_ABORTIFHUNG bounds a nonresponsive target.
+        self.gui.SendMessageTimeout(self.hwnd, 0, 0, 0, 2, 200)
 
     def send(self, events):
         self.guard()
@@ -471,6 +504,12 @@ def execute(request, native, indicator, publish):
               'input_blocked': False, 'input_gate': 'low_level_hooks', 'cancel_key': 'Escape'}
     locked = False
     locked_at = None
+    def cleanup_progress(phase):
+        report['phase'] = phase
+        try:
+            publish(report)
+        except Exception:
+            pass  # diagnostic I/O must never prevent input release
     publish(report)
     try:
         if any(step['do'] == 'capture' for step in request['steps']):
@@ -486,7 +525,11 @@ def execute(request, native, indicator, publish):
         locked_at = time.monotonic()
         report.update(phase='controlling', input_blocked=True)
         publish(report)
+        report['phase'] = 'activating'
+        publish(report)
         native.activate()
+        report['phase'] = 'controlling'
+        publish(report)
         indicator.show('กำลังควบคุมชั่วคราว')
         for i, step in enumerate(request['steps']):
             report['stopped_at_step'] = i
@@ -526,6 +569,7 @@ def execute(request, native, indicator, publish):
         report['error'] = str(exc)
     finally:
         if locked:
+            cleanup_progress('releasing_inputs')
             try:
                 native.release_mouse(stop=True)
                 report['mouse_buttons_released'] = True
@@ -537,16 +581,19 @@ def execute(request, native, indicator, publish):
             except Exception as exc:
                 report.update(ok=False, keys_released=False, key_release_error=str(exc))
             if report['mouse_buttons_released'] and report['keys_released']:
+                cleanup_progress('restoring')
                 try:
                     report.update(native.restore())
                 except Exception as exc:
                     report['restore_error'] = str(exc)
             try:
+                cleanup_progress('unblocking')
                 native.unblock()
                 report['input_blocked'] = False
                 report['input_blocked_ms'] = round((time.monotonic() - locked_at) * 1000)
             except Exception as exc:
                 report.update(ok=False, error=str(exc))
+        cleanup_progress('closing_indicator')
         indicator.close()
         report['phase'] = 'released' if not report['input_blocked'] else 'release_failed'
         publish(report)
@@ -591,6 +638,8 @@ def worker():
         if native is not None:
             native.release_inputs()
     threading.Thread(target=watchdog, args=(request['parent_pid'], request['timeout_ms'], done, cleanup), daemon=True).start()
+    _write_report(Path(request['folder']) / 'result.json', {
+        'ok': False, 'phase': 'initializing', 'completed_steps': 0, 'steps': [], 'input_blocked': False})
     from takeover_indicator import ScreenIndicator
     native = NativeInput(request['hwnd'], request['pid'])
     indicator = ScreenIndicator(request['hwnd'], request['reason'], request['timeout_ms'])
