@@ -6,6 +6,8 @@ removes the hooks even if the main thread is stuck in a native API.
 """
 import ctypes
 import ctypes.wintypes as wt
+from contextlib import contextmanager
+import gc
 import json
 import os
 import secrets
@@ -34,10 +36,10 @@ def validate(steps, reason, timeout_ms, allow_takeover):
         raise ValueError('timeout_ms must be 1000..8000; the lease cannot be renewed')
     if not isinstance(steps, list) or not 1 <= len(steps) <= 20:
         raise ValueError('steps must contain 1..20 steps')
-    schemas = {'click': ({'x', 'y'}, {'button'}), 'hover': ({'x', 'y'}, {'dwell_ms'}),
-               'drag': ({'x1', 'y1', 'x2', 'y2'}, {'button', 'duration_ms'}),
+    schemas = {'click': ({'x', 'y'}, {'button', 'modifiers'}), 'hover': ({'x', 'y'}, {'dwell_ms'}),
+               'drag': ({'x1', 'y1', 'x2', 'y2'}, {'button', 'duration_ms', 'modifiers'}),
                'scroll': ({'x', 'y', 'clicks'}, set()), 'type': ({'text'}, {'replace'}),
-               'key': ({'keys'}, set()), 'wait': ({'ms'}, set()), 'capture': (set(), {'region'})}
+               'key': ({'keys'}, {'hold_ms'}), 'wait': ({'ms'}, set()), 'capture': (set(), {'region'})}
     requested_ms = 400  # visible announcement before any input is blocked
     for i, step in enumerate(steps):
         if not isinstance(step, dict) or step.get('do') not in schemas:
@@ -45,11 +47,18 @@ def validate(steps, reason, timeout_ms, allow_takeover):
         required, optional = schemas[step['do']]
         if not required <= step.keys() or set(step) - required - optional - {'do'}:
             raise ValueError(f'step {i}: missing or unknown fields')
-        for field in ('x', 'y', 'x1', 'y1', 'x2', 'y2', 'clicks', 'ms', 'dwell_ms', 'duration_ms'):
+        requested_ms += 40  # dispatch/repaint after each step
+        for field in ('x', 'y', 'x1', 'y1', 'x2', 'y2', 'clicks', 'ms', 'dwell_ms', 'duration_ms', 'hold_ms'):
             if field in step and type(step[field]) is not int:
                 raise ValueError(f'step {i}: {field} must be an integer')
         if step.get('button', 'left') not in ('left', 'right'):
             raise ValueError(f'step {i}: button must be left or right')
+        if 'modifiers' in step:
+            modifiers = step['modifiers']
+            if (not isinstance(modifiers, list) or len(modifiers) > 3
+                    or any(not isinstance(k, str) or k not in ('ctrl', 'shift', 'alt') for k in modifiers)
+                    or len(set(modifiers)) != len(modifiers)):
+                raise ValueError(f'step {i}: modifiers must be distinct ctrl/shift/alt names')
         if step['do'] == 'drag':
             duration = step.get('duration_ms', 500)
             if not 100 <= duration <= 1500:
@@ -70,6 +79,12 @@ def validate(steps, reason, timeout_ms, allow_takeover):
                 raise ValueError(f'step {i}: keys must contain 1..4 supported lowercase key names')
             if len(set(keys)) != len(keys):
                 raise ValueError(f'step {i}: duplicate keys')
+            hold_ms = step.get('hold_ms', 80)
+            if not 20 <= hold_ms <= 500:
+                raise ValueError(f'step {i}: hold_ms must be 20..500')
+            requested_ms += hold_ms
+        if step['do'] == 'type' and step.get('replace', False):
+            requested_ms += 80
         if step['do'] in ('wait', 'hover'):
             ms = step.get('ms', step.get('dwell_ms', 500))
             if not 0 <= ms <= 1500:
@@ -122,6 +137,7 @@ def run(hwnd, steps, reason, timeout_ms=3000, allow_takeover=False):
                           interrupted_step_outcome='unknown; inspect state before retrying')
             report.update(input_blocked=False, phase='worker_exited')
             report['mouse_buttons_released'] = None  # cleanup cannot be confirmed after a crash
+            report['keys_released'] = None
             if stderr:
                 report['diagnostic'] = stderr.decode('utf-8', errors='replace')[:1000]
         # A successful capture can precede a failed release; never mislabel it as batch success.
@@ -168,6 +184,7 @@ class NativeInput:
         self.hwnd, self.pid = hwnd, pid
         self.gate = None
         self.held_mouse = 0
+        self.held_keys = {}
         self.stopping = False
         self.dispatch_lock = threading.Lock()
         # Windows' mouse input path can truncate dwExtraInfo to 32 bits even
@@ -176,6 +193,8 @@ class NativeInput:
         self.user = ctypes.WinDLL('user32', use_last_error=True)
         self.user.SendInput.argtypes = [wt.UINT, ctypes.POINTER(_Input), ctypes.c_int]
         self.user.SendInput.restype = wt.UINT
+        self.user.MapVirtualKeyW.argtypes = [wt.UINT, wt.UINT]
+        self.user.MapVirtualKeyW.restype = wt.UINT
         self.user.GetGUIThreadInfo.argtypes = [wt.DWORD, ctypes.POINTER(_GuiThreadInfo)]
         self.user.GetGUIThreadInfo.restype = wt.BOOL
         self.previous = self.gui.GetForegroundWindow()
@@ -251,6 +270,9 @@ class NativeInput:
         for event in events:
             if event.type == 0:
                 self.held_mouse |= event.mi.dwFlags & (2 | 8)
+            elif event.type == 1 and not event.ki.dwFlags & 2:
+                key = (event.ki.wVk, event.ki.wScan, event.ki.dwFlags & ~2)
+                self.held_keys[key] = None
         self.raw_send(events)
         for event in events:
             if event.type == 0:
@@ -258,6 +280,8 @@ class NativeInput:
                     self.held_mouse &= ~2
                 if event.mi.dwFlags & 16:
                     self.held_mouse &= ~8
+            elif event.type == 1 and event.ki.dwFlags & 2:
+                self.held_keys.pop((event.ki.wVk, event.ki.wScan, event.ki.dwFlags & ~2), None)
 
     def raw_send(self, events):
         for event in events:
@@ -269,14 +293,67 @@ class NativeInput:
         if self.user.SendInput(len(array), array, ctypes.sizeof(_Input)) != len(array):
             raise RuntimeError('SendInput did not accept every event; state may be partial')
 
-    def key(self, keys):
+    def _key_event(self, key, up=False):
+        scan = self.user.MapVirtualKeyW(KEYS[key], 4)  # MAPVK_VK_TO_VSC_EX
+        if not scan:
+            raise ValueError(f'no scan code available for {key}')
+        flags = 8 | (2 if up else 0) | (1 if scan & 0xFF00 == 0xE000 else 0)
+        return _Input(type=1, ki=_Keyboard(wScan=scan & 0xFF, dwFlags=flags))
+
+    def key(self, keys, hold_ms=80, wait=None):
         self.keyboard_guard()
-        events = []
-        for up, seq in ((False, keys), (True, list(reversed(keys)))):
-            for key in seq:
-                flags = (2 if up else 0) | (1 if key in ('up', 'down', 'left', 'right', 'home', 'end', 'delete') else 0)
-                events.append(_Input(type=1, ki=_Keyboard(wVk=KEYS[key], dwFlags=flags)))
-        self.send(events)
+        events = [self._key_event(key) for key in keys]
+        try:
+            self.send(events)
+            # Polling game engines need a real down interval across frames.
+            if wait is not None:
+                wait(hold_ms, self.keyboard_guard)
+            else:
+                deadline = time.monotonic() + hold_ms / 1000
+                while time.monotonic() < deadline:
+                    self.keyboard_guard()
+                    time.sleep(min(0.01, max(0, deadline - time.monotonic())))
+        finally:
+            self.release_keys()
+
+    @contextmanager
+    def modifiers(self, keys):
+        events = [self._key_event(key) for key in keys]
+        try:
+            if events:
+                self.send(events)
+            yield
+        finally:
+            self.release_keys()
+
+    def click(self, x, y, button='left', modifiers=()):
+        self.point(x, y)
+        with self.modifiers(modifiers):
+            try:
+                self.mouse([2, 4] if button == 'left' else [8, 16])
+            finally:
+                self.release_mouse()
+
+    def release_keys(self, stop=False):
+        if stop:
+            self.stopping = True
+        acquired = self.dispatch_lock.acquire(timeout=0.1)
+        try:
+            held = list(self.held_keys)
+            if held:
+                self.raw_send([_Input(type=1, ki=_Keyboard(wVk=vk, wScan=scan, dwFlags=flags | 2))
+                               for vk, scan, flags in reversed(held)])
+                for key in held:
+                    self.held_keys.pop(key, None)
+        finally:
+            if acquired:
+                self.dispatch_lock.release()
+
+    def release_inputs(self):
+        try:
+            self.release_mouse(stop=True)
+        finally:
+            self.release_keys(stop=True)
 
     def text(self, text, replace):
         self.keyboard_guard()
@@ -347,7 +424,7 @@ class NativeInput:
             if acquired:
                 self.dispatch_lock.release()
 
-    def drag(self, x1, y1, x2, y2, button, duration_ms, wait):
+    def drag(self, x1, y1, x2, y2, button, duration_ms, wait, modifiers=()):
         count = max(2, (duration_ms + 19) // 20)
         points = [(round(x1 + (x2 - x1) * i / count),
                    round(y1 + (y2 - y1) * i / count)) for i in range(count + 1)]
@@ -355,13 +432,14 @@ class NativeInput:
         for x, y in points:  # refuse an already covered path before pressing
             self.check_point(x, y)
         self.point(x1, y1)
-        try:
-            self.mouse([2 if button == 'left' else 8])
-            for x, y in points[1:]:
-                wait(duration_ms / count, self.guard)
-                self.point(x, y)  # recheck changing ownership/occlusion and foreground
-        finally:
-            self.release_mouse()
+        with self.modifiers(modifiers):
+            try:
+                self.mouse([2 if button == 'left' else 8])
+                for x, y in points[1:]:
+                    wait(duration_ms / count, self.guard)
+                    self.point(x, y)  # recheck changing ownership/occlusion and foreground
+            finally:
+                self.release_mouse()
 
     def restore(self):
         # Restore before unblocking, so cleanup cannot override a subsequent human switch.
@@ -395,6 +473,12 @@ def execute(request, native, indicator, publish):
     locked_at = None
     publish(report)
     try:
+        if any(step['do'] == 'capture' for step in request['steps']):
+            report['phase'] = 'preparing_capture'
+            publish(report)
+            indicator.prepare_capture()  # expensive imports happen before blocking human input
+        report['phase'] = 'announcing'
+        publish(report)
         indicator.show('ขอควบคุมชั่วคราว')  # failure here must prevent takeover
         indicator.wait(400)
         native.block()
@@ -409,13 +493,14 @@ def execute(request, native, indicator, publish):
             publish(report)  # crash while executing this step has an explicitly unknown outcome
             native.guard()
             kind = step['do']
-            if kind in ('click', 'hover', 'scroll'):
+            if kind in ('hover', 'scroll'):
                 native.point(step['x'], step['y'])
             if kind == 'click':
-                native.mouse([2, 4] if step.get('button', 'left') == 'left' else [8, 16])
+                native.click(step['x'], step['y'], step.get('button', 'left'), step.get('modifiers', []))
             elif kind == 'drag':
                 native.drag(step['x1'], step['y1'], step['x2'], step['y2'],
-                            step.get('button', 'left'), step.get('duration_ms', 500), indicator.wait)
+                            step.get('button', 'left'), step.get('duration_ms', 500), indicator.wait,
+                            step.get('modifiers', []))
             elif kind == 'hover':
                 indicator.wait(step.get('dwell_ms', 500), native.guard)
             elif kind == 'scroll':
@@ -423,11 +508,14 @@ def execute(request, native, indicator, publish):
             elif kind == 'type':
                 native.text(step['text'], step.get('replace', False))
             elif kind == 'key':
-                native.key(step['keys'])
+                native.key(step['keys'], step.get('hold_ms', 80), indicator.wait)
             elif kind == 'wait':
                 indicator.wait(step['ms'], native.guard)
             elif kind == 'capture':
-                report['capture'] = indicator.capture(native, step.get('region'), request['folder'])
+                def capture_progress(phase):
+                    report['capture_phase'] = phase
+                    publish(report)
+                report['capture'] = indicator.capture(native, step.get('region'), request['folder'], capture_progress)
             report['steps'].append({'index': i, 'do': kind, 'ok': True})
             report['completed_steps'] += 1
             publish(report)
@@ -443,7 +531,12 @@ def execute(request, native, indicator, publish):
                 report['mouse_buttons_released'] = True
             except Exception as exc:
                 report.update(ok=False, mouse_buttons_released=False, mouse_release_error=str(exc))
-            if report['mouse_buttons_released']:
+            try:
+                native.release_keys(stop=True)
+                report['keys_released'] = True
+            except Exception as exc:
+                report.update(ok=False, keys_released=False, key_release_error=str(exc))
+            if report['mouse_buttons_released'] and report['keys_released']:
                 try:
                     report.update(native.restore())
                 except Exception as exc:
@@ -496,18 +589,48 @@ def worker():
     native = None
     def cleanup():
         if native is not None:
-            native.release_mouse(stop=True)
+            native.release_inputs()
     threading.Thread(target=watchdog, args=(request['parent_pid'], request['timeout_ms'], done, cleanup), daemon=True).start()
     from takeover_indicator import ScreenIndicator
     native = NativeInput(request['hwnd'], request['pid'])
     indicator = ScreenIndicator(request['hwnd'], request['reason'], request['timeout_ms'])
     try:
-        report = execute(request, native, indicator,
-                         lambda value: _write_report(Path(request['folder']) / 'result.json', value))
+        with worker_apartment():
+            report = execute(request, native, indicator,
+                             lambda value: _write_report(Path(request['folder']) / 'result.json', value))
         return 0 if report['phase'] == 'released' else 1
     finally:
         if native.gate is None or (not native.gate.active and not native.gate.thread.is_alive()):
             done.set()
+
+
+@contextmanager
+def worker_apartment():
+    """Keep activation COM cycles off capture/hook threads until input release."""
+    # Initialize without eagerly importing pywinauto: successful native
+    # activation never needs that relatively expensive fallback dependency.
+    import pythoncom
+    initialized = False
+    try:
+        pythoncom.CoInitializeEx(pythoncom.COINIT_MULTITHREADED)
+        initialized = True
+    except pythoncom.com_error as exc:
+        if exc.hresult & 0xFFFFFFFF != 0x80010106:
+            raise
+    try:
+        was_enabled = gc.isenabled()
+        gc.disable()
+        try:
+            yield
+        finally:
+            try:
+                gc.collect()  # execute already released the gate; main apartment is still alive
+            finally:
+                if was_enabled:
+                    gc.enable()
+    finally:
+        if initialized:
+            pythoncom.CoUninitialize()
 
 
 if __name__ == '__main__':

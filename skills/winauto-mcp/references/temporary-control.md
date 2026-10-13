@@ -126,6 +126,12 @@ allowed only as the last step; unlike `control_set`, capture is not required.
   Cleanup sends only those button-ups when normal input guards have failed.
   A hard crash/forced kill or a rejected SendInput can prevent confirmation;
   inspect `mouse_buttons_released` instead of assuming exit resets button state.
+- Click/drag steps accept `modifiers=["ctrl","shift","alt"]` (any distinct
+  subset). Modifiers stay down through pointer button-up. Tracked keys, including
+  partial sends, release on success, failure, cancellation and watchdog cleanup;
+  inspect `keys_released`. There is no hold spanning steps or calls.
+- Key steps accept `hold_ms=80` (20..500 ms) and send scan-code down/up separately.
+  Inspect application state after Return/Escape; delivery is not business success.
 - A separate watchdog exits the worker at deadline or server death. Its input
   hooks disappear on worker exit. Physical Escape cancels and removes the gate;
   cancellation skips cursor/focus restoration to avoid overriding human action.
@@ -138,6 +144,10 @@ allowed only as the last step; unlike `control_set`, capture is not required.
 - Final capture uses fresh visible client pixels before focus release, preserving
   transient suggestion/hover state. It refuses foreign occlusion and never reuses
   a stale image. Off-client popup pixels require separately attaching that popup.
+- Capture imports load before blocking. Screen read/encoding has a 1 s bound,
+  reserving 300 ms for cleanup. Inspect `capture_phase` on timeout; a failed image
+  does not invalidate completed input. Occlusion errors identify HWND/PID/class
+  without titles and ignore DWM-cloaked windows. Real visible covers still refuse.
 
 ## Verify and recover
 

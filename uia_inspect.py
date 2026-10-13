@@ -42,13 +42,19 @@ def root_wrapper(hwnd):
     return UIAWrapper(UIAElementInfo(int(hwnd)))
 
 
-def walk(root, max_depth=MAX_DEPTH, max_nodes=MAX_NODES, strict=False):
+def walk(root, max_depth=MAX_DEPTH, max_nodes=MAX_NODES, strict=False, scope="window"):
     """Bounded walk of this window only, including non-interactive ancestors."""
+    if scope not in ("window", "non_document"):
+        raise ValueError('scope must be window or non_document')
     pending = [(root, 0)]
     visited = 0
     while pending and visited < max_nodes:
         wrapper, depth = pending.pop()
         visited += 1
+        # Explicitly exclude Document roots AND their descendants. Uniqueness
+        # is still verified across the complete remaining tree, never by first match.
+        if scope == "non_document" and wrapper.element_info.control_type == "Document":
+            continue
         yield wrapper
         try:
             children = wrapper.children()
@@ -113,10 +119,10 @@ def describe(wrapper, hwnd):
     }
 
 
-def get_elements(hwnd, max_depth=MAX_DEPTH, max_nodes=MAX_NODES, max_results=MAX_RESULTS):
+def get_elements(hwnd, max_depth=MAX_DEPTH, max_nodes=MAX_NODES, max_results=MAX_RESULTS, scope="window"):
     elements = []
     with com_session():
-        for wrapper in walk(root_wrapper(hwnd), max_depth, max_nodes):
+        for wrapper in walk(root_wrapper(hwnd), max_depth, max_nodes, scope=scope):
             try:
                 if wrapper.element_info.control_type not in INTERACTIVE_TYPES:
                     continue

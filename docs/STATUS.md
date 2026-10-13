@@ -1,5 +1,19 @@
 # Status: UIA and bounded temporary control
 
+## Open issue fixes (2026-10-13)
+
+- Added bounded foreground modifiers, scan-code key holds and tracked key cleanup;
+  scoped non-Document toolbar lookup; explicit guarded visible-pixel capture;
+  GDI/journal cleanup isolation; bounded optional capture with phase diagnostics
+  and worker COM lifetime management.
+- Owned native probe completed Shift+click, Ctrl+Shift+drag, Return, Escape and
+  fresh crop: 5/5 steps, input gate 1375 ms, buttons/keys released and cursor/focus
+  restored. Native Close and repeated GDI capture regressions passed separately.
+- Exact Unity/Edge acceptance for #11/#13/#14 remains open. See
+  [issue review and reproduction](issue-fixes-20261013.md) for evidence boundaries.
+- Final full suite: 110/110 passed, no failures/skips; pip check, skill validation
+  and CRLF-aware diff check passed. Actual stdio still discovers 36 tools.
+
 ## Guarded hybrid batches (2026-10-12)
 
 - Added `guarded_steps` (36 tools): shared UIA preflight, bound identities,

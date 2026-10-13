@@ -65,7 +65,7 @@ def _remember(hwnd, wrapper):
     _targets[hwnd] = uia.runtime_id(wrapper)
 
 
-def _find(hwnd, name=None, automation_id=None, selected=False, editable=False, target_id=None, candidates=None):
+def _find(hwnd, name=None, automation_id=None, selected=False, editable=False, target_id=None, candidates=None, scope="window"):
     if name is not None and not name.strip():
         raise ValueError("name must not be empty")
     if automation_id is not None and not automation_id.strip():
@@ -77,7 +77,7 @@ def _find(hwnd, name=None, automation_id=None, selected=False, editable=False, t
     remembered = target_id
     if remembered is None and selected and name is None and automation_id is None:
         remembered = _targets.get(hwnd)
-    for wrapper in (candidates if candidates is not None else uia.walk(uia.root_wrapper(hwnd), strict=True)):
+    for wrapper in (candidates if candidates is not None else uia.walk(uia.root_wrapper(hwnd), strict=True, scope=scope)):
         info = wrapper.element_info
         if remembered is not None and uia.runtime_id(wrapper) != remembered:
             continue
@@ -198,14 +198,14 @@ def click_in_window(hwnd, client_x, client_y, button="left", double=False,
         return _activate(hwnd, _at_point(hwnd, client_x, client_y, interactive=True))
 
 
-def click_element(hwnd, name=None, automation_id=None, button="left", double=False):
+def click_element(hwnd, name=None, automation_id=None, button="left", double=False, scope="window"):
     ensure_input_allowed(hwnd)
     _click_options(button, double)
     with _lock, background_action(hwnd), uia.com_session():
-        wrapper = _find(hwnd, name, automation_id)
+        wrapper = _find(hwnd, name, automation_id, scope=scope)
         desc = uia.describe(wrapper, hwnd)
         action = _activate(hwnd, wrapper)
-        return {"action": action, "element": desc, "backend": "pywinauto-uia"}
+        return {"action": action, "element": desc, "backend": "pywinauto-uia", "scope": scope}
 
 
 def _type_into(hwnd, wrapper, text, replace=False):
@@ -240,9 +240,9 @@ def type_text(text, hwnd=None, name=None, automation_id=None, replace=False):
         return _type_into(hwnd, wrapper, text, replace)
 
 
-def read_element(hwnd, name=None, automation_id=None):
+def read_element(hwnd, name=None, automation_id=None, scope="window"):
     with _lock, uia.com_session():
-        wrapper = _find(hwnd, name, automation_id)
+        wrapper = _find(hwnd, name, automation_id, scope=scope)
         return _read_from(hwnd, wrapper)
 
 

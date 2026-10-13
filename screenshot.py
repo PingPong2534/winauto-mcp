@@ -43,13 +43,13 @@ def _print_window(hwnd) -> Image.Image | None:
     window_dc = win32gui.GetWindowDC(hwnd)
     if not window_dc:
         return None
-    src = mem = bmp = None
+    src = mem = bmp = previous = None
     try:
         src = win32ui.CreateDCFromHandle(window_dc)
         mem = src.CreateCompatibleDC()
         bmp = win32ui.CreateBitmap()
         bmp.CreateCompatibleBitmap(src, win_w, win_h)
-        mem.SelectObject(bmp)
+        previous = mem.SelectObject(bmp)
         if not ctypes.windll.user32.PrintWindow(hwnd, mem.GetSafeHdc(), PW_RENDERFULLCONTENT):
             return None
         info = bmp.GetInfo()
@@ -59,17 +59,28 @@ def _print_window(hwnd) -> Image.Image | None:
     except (win32ui.error, win32gui.error, ValueError):
         return None
     finally:
+        # GetWindowDC is borrowed: ReleaseDC, never DeleteDC. Attempt every
+        # cleanup even when the target closes during PrintWindow. Cosmetic
+        # capture cleanup must not mask the original result with DeleteDC failed.
+        cleanup = []
+        if mem is not None and previous is not None:
+            cleanup.append(lambda: mem.SelectObject(previous))
         if bmp is not None:
-            win32gui.DeleteObject(bmp.GetHandle())
+            cleanup.append(lambda: win32gui.DeleteObject(bmp.GetHandle()))
         if mem is not None:
-            mem.DeleteDC()
-        if src is not None:
-            src.DeleteDC()
-        win32gui.ReleaseDC(hwnd, window_dc)
+            cleanup.append(mem.DeleteDC)
+        cleanup.append(lambda: win32gui.ReleaseDC(hwnd, window_dc))
+        for release in cleanup:
+            try:
+                release()
+            except Exception:
+                pass
 
     # PrintWindow paints the whole window; every coordinate in this server is
     # client-relative, so trim the border and title bar off the same way the
     # screen-grab path does.
+    if not win32gui.IsWindow(hwnd):
+        return None
     cl, ct, cr, cb = get_client_rect_screen(hwnd)
     crop = (cl - win_left, ct - win_top, cr - win_left, cb - win_top)
     if crop[2] > img.width or crop[3] > img.height or crop[2] <= crop[0] or crop[3] <= crop[1]:
@@ -103,14 +114,18 @@ def grab_window(hwnd, allow_occluded: bool = True) -> Image.Image:
 
     Tries PrintWindow first so a covered window still reads correctly, and
     falls back to scraping the screen for windows PrintWindow cannot render.
-    Pass allow_occluded=False to force the screen grab -- worth it only when
-    what matters is literally what a person would see, compositing included.
+    Pass allow_occluded=False to force a guarded screen grab for GPU content
+    PrintWindow partially omits. Both screen paths refuse foreign occlusion.
 
     No PNG encoding: polling loops (wait_stable) compare dozens of frames and
     never show them to anyone; making each one round-trip through PNG encode
     and decode would dominate the poll interval and blur the very timing they
     measure.
     """
+    if win32gui.IsIconic(hwnd):
+        raise ValueError("cannot capture a minimized window without restoring it")
+    if not win32gui.IsWindowVisible(hwnd):
+        raise ValueError("cannot capture a hidden window")
     if allow_occluded:
         img = _print_window(hwnd)
         if img is not None:
@@ -121,25 +136,53 @@ def grab_window(hwnd, allow_occluded: bool = True) -> Image.Image:
             raise ValueError("cannot capture a minimized window without restoring it")
         with hidden_for_capture():
             return _uncovered_screen_grab(hwnd)
-    return _screen_grab(hwnd)
+    with hidden_for_capture():
+        return _uncovered_screen_grab(hwnd)
 
 
 def _uncovered_screen_grab(hwnd):
     """Check occlusion while our own outline is temporarily hidden."""
     target = get_client_rect_screen(hwnd)
-    above = win32gui.GetWindow(hwnd, 3)  # GW_HWNDPREV, higher in Z order
-    while above:
-        if win32gui.IsWindowVisible(above) and not win32gui.IsIconic(above):
+    ensure_uncovered(hwnd, target)
+    image = _screen_grab(hwnd)
+    ensure_uncovered(hwnd, target)
+    if get_client_rect_screen(hwnd) != target:
+        raise ValueError('target geometry changed during screen capture')
+    return image
+
+
+def _cloaked(hwnd):
+    value = ctypes.c_ulong()
+    result = ctypes.windll.dwmapi.DwmGetWindowAttribute(
+        ctypes.c_void_p(hwnd), 14, ctypes.byref(value), ctypes.sizeof(value))
+    return result == 0 and bool(value.value)
+
+
+def ensure_uncovered(hwnd, target, belongs=None):
+    """Refuse intersecting visible windows above target; omit window titles.
+
+    DWM-cloaked windows do not contribute screen pixels. Unknown DWM state is
+    conservatively treated as visible. Owned popups are allowed only when the
+    foreground caller supplies its checked window-family predicate.
+    """
+    import win32process
+    above = win32gui.GetTopWindow(0)
+    visited = set()
+    while above and above != hwnd and above not in visited:
+        visited.add(above)
+        if (win32gui.IsWindowVisible(above) and not win32gui.IsIconic(above)
+                and not (belongs and belongs(above)) and not _cloaked(above)):
             left, top, right, bottom = win32gui.GetWindowRect(above)
-            if (left < target[2] and right > target[0]
-                    and top < target[3] and bottom > target[1]):
+            if left < target[2] and right > target[0] and top < target[3] and bottom > target[1]:
+                _, pid = win32process.GetWindowThreadProcessId(above)
                 raise ValueError(
-                    "PrintWindow could not render the target and another window covers it; "
-                    "screen capture would show that other app. Use get_elements/read_element "
-                    "or uncover the target manually. No foreground change was made."
-                )
-        above = win32gui.GetWindow(above, 3)
-    return _screen_grab(hwnd)
+                    'capture region is covered by another window (another window covers it); '
+                    f'covering_hwnd={above}, pid={pid}, class={win32gui.GetClassName(above)!r}; '
+                    'screen capture would include its pixels. Uncover the target or use '
+                    'get_elements/read_element. No foreground change was made by capture.')
+        above = win32gui.GetWindow(above, 2)  # GW_HWNDNEXT
+    if above != hwnd:
+        raise ValueError('attached window disappeared during capture')
 
 
 def to_png(img: Image.Image) -> bytes:

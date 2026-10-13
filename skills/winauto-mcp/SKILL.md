@@ -68,6 +68,9 @@ first. A missing UIA pattern can justify an explicit mode change when permitted.
    match. Inspect `enabled`, `control_type`, `actions` and `control_steps`.
 
 Inspection is bounded; an absent entry does not prove a control does not exist.
+For browser toolbar lookup blocked by a deep webpage, use
+`get_elements(scope="non_document")`, then the same scope on `read_element` or
+`click_element`. Document roots/subtrees are excluded; ambiguity/limits remain.
 Reinspect after navigation, new dialogs or control replacement. For UIA actions
 on a separate top-level dialog, select and attach its HWND first. Foreground
 batches can interact with the attached window's owned popup; see the temporary
@@ -161,6 +164,9 @@ or business success. There is no standalone pixel-stability wait tool.
 - Background screenshot capture uses PrintWindow first. If capture fails while covered,
   continue with UIA reads when sufficient or report the need to uncover the
   target manually. Do not raise/focus the app or accept another app's pixels.
+  For partially black GPU content while uncovered, use
+  `screenshot(capture_mode="screen")` or the same option on capture_screen/
+  capture_region. Visible capture still refuses foreign occlusion.
 - Disabled/read-only targets, ambiguous selectors, missing patterns and known
   higher-integrity writes are refused. Report the specific blocker; do not
   loop the same mutation. Reinspect after a disappeared-control error.
@@ -174,6 +180,10 @@ or business success. There is no standalone pixel-stability wait tool.
   default still refuses physical input. `take_control=True` and
   `keep_foreground(True)` stay unsupported.
   Prefer an exposed command for Save/Enter and `set_value` for sliders when suitable.
+  Foreground click/drag accept distinct ctrl/shift/alt `modifiers`; key accepts
+  `hold_ms=80` (20..500 ms). Check `keys_released`, `mouse_buttons_released` and
+  application response. On optional capture failure, inspect `capture_phase`
+  and completed progress; do not replay input to obtain an image.
 - Hide decorations with `release_control()` when finished; it keeps the window
   attached. Use `detach_window()` when ending the attachment.
   These tools and `release_keyboard()` do not cancel a running foreground batch;

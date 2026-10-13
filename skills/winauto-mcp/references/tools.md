@@ -33,9 +33,21 @@ ending an app session; inspect/list/attach again before further app operations.
 
 ## Inspection and capture
 
+`get_elements`, `read_element` and `click_element` accept `scope="non_document"`
+to exclude all UIA Document roots and descendants when inspecting/operating a
+browser toolbar. Use the same scope for inspection and action. Strict uniqueness,
+depth and node guards apply throughout the remaining tree. The default `window`
+scope retains whole-window lookup; scoped mode cannot select webpage content.
+
+`capture_screen`, `screenshot` and `capture_region` accept `capture_mode="screen"`
+for visible GPU content partially omitted by PrintWindow. Default `auto` tries
+PrintWindow first. Screen mode keeps foreign-occlusion and geometry guards and
+does not raise the target. Refusals identify covering HWND/PID/class without
+window titles. DWM-cloaked windows are excluded; visible covers still refuse.
+
 ### `get_elements`
 
-`get_elements()` returns JSON for interactive controls inside the attached HWND:
+`get_elements(scope="window")` returns JSON for interactive controls inside the attached HWND:
 `name`, `automation_id`, `control_type`, `enabled`, client `rect`, `runtime_id`,
 `actions`, `control_steps` and category. Inspection is capped at 150 results,
 depth 15 and 3,000 nodes. Use it for unique selectors and capabilities, not to
@@ -45,7 +57,7 @@ refuses ambiguity or an incomplete search instead of picking a partial match.
 
 ### `read_element`
 
-`read_element(name=None, automation_id=None)` returns the selected control's
+`read_element(name=None, automation_id=None, scope="window")` returns the selected control's
 description plus available `value`, `read_only`, `toggle_state`, `selected`,
 `range_value`. Password text is omitted. Use a unique ID/name to verify state
 before toggles or after asynchronous app updates; missing pattern properties
@@ -82,7 +94,7 @@ than the returned crop. Never infer coordinates from client-resized images.
 
 ### `click_element`
 
-`click_element(name=None, button="left", double=False, automation_id=None)`
+`click_element(name=None, button="left", double=False, automation_id=None, scope="window")`
 activates one uniquely selected, enabled control. Returns JSON with `action`,
 `element` and `backend`. Prefer this over coordinates. Buttons use InvokePattern,
 checkboxes TogglePattern, items/radios/tabs SelectionItemPattern, expandable
@@ -327,9 +339,9 @@ allow_takeover=True and a nonempty single-line reason, at most 120 characters.
 Use it for focus-dependent suggestion boxes, actual hover, missing scroll
 patterns or key navigation. It never runs implicitly from a background tool.
 
-Allow 1..20 steps: click(x,y,button="left"|"right"),
-drag(x1,y1,x2,y2,button="left"|"right",duration_ms=500), hover(x,y,dwell_ms=500),
-scroll(x,y,clicks), type(text,replace=False), key(keys=[...]), wait(ms), and one
+Allow 1..20 steps: click(x,y,button="left"|"right",modifiers=[]),
+drag(x1,y1,x2,y2,button="left"|"right",duration_ms=500,modifiers=[]), hover(x,y,dwell_ms=500),
+scroll(x,y,clicks), type(text,replace=False), key(keys=[...],hold_ms=80), wait(ms), and one
 optional final capture(region=[x1,y1,x2,y2]). Step objects use the `do` field.
 Coordinates are client-relative; pointer points must hit the target or owned
 popup. Capture regions must be wholly inside the client. Positive scroll clicks
@@ -339,7 +351,10 @@ Keys: enter/tab/escape/arrows/home/end/backspace/delete, ctrl/shift/alt, a-z, 0-
 1..4 unique lowercase names form one chord. Drag duration is 100..1500 ms;
 its requested time counts toward the timeout budget. Endpoints must differ.
 The path is a straight line within the attached window/owned popup. No cross-app
-drop, modifiers or held key/button between steps/calls are exposed.
+drop or held key/button between steps/calls is exposed. Pointer modifiers are
+distinct ctrl/shift/alt names, held through button-up and released afterwards.
+Key chords use scan codes with a 20..500 ms down interval (default 80 ms).
+Successful key delivery does not establish the target application's response.
 Real type inserts at the physical caret; replace sends Ctrl+A first. It does
 not verify ValuePattern readback. Inspect the actual focus and outcome.
 
@@ -359,9 +374,13 @@ Returns JSON report plus a fresh visible-client PNG if final capture and batch
 succeed. Inspect ok/completed_steps/stopped_at_step/steps/phase/error and
 restoration fields. Runtime failures and watchdog exits return ok=false;
 confirmed steps are retained and an interrupted step can have unknown outcome.
-Inspect `mouse_buttons_released`: normal cleanup releases tracked buttons before
-restoring cursor/focus. Watchdog cleanup attempts the same button-ups; a forced
-worker exit cannot confirm release and returns null for that field.
+Inspect `mouse_buttons_released` and `keys_released`: normal cleanup releases
+tracked inputs before restoring cursor/focus. Watchdog cleanup attempts only
+their up events; a forced worker exit cannot confirm release and returns null.
+Capture dependencies load before the input gate. Optional screen-grab/PNG work
+has a 1 s bound and reserves 300 ms for cleanup; failure retains completed input
+steps. `capture_phase` identifies occlusion_check/dwm_flush/screen_grab/png_encode/
+verify_and_save/complete. Never replay input because its optional capture failed.
 No rollback or stale capture. Capture occurs before release so a transient
 popup is visible where it falls within the client. The normal UIA seen-image
 cache/logical target is cleared afterwards; obtain a new background capture.
