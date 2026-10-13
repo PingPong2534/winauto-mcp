@@ -84,6 +84,22 @@ The watchdog attempts the same release before exit. Forced kill or native input
 failure may leave release unconfirmed; inspect `mouse_buttons_released` (null
 after worker exit), not process termination alone.
 
+Click/drag steps accept distinct ctrl/shift/alt modifiers held through button-up.
+Key steps use scan-code injection and a separate down interval (`hold_ms=80`,
+20..500 ms). Track possible key-downs before SendInput so partial sends, Escape
+and watchdog cleanup can release them. Inspect `keys_released` as well as mouse
+release; neither delivery nor cleanup proves the application's command response.
+See Microsoft's [KEYBDINPUT contract](https://learn.microsoft.com/en-us/windows/win32/api/winuser/ns-winuser-keybdinput).
+
+Capture imports load before the gate. Screen read/PNG work runs in a daemon
+thread with a 1 s bound and 300 ms reserved from the original lease for cleanup.
+The thread cannot inject input or save a late image. `capture_phase` records
+occlusion_check/dwm_flush/screen_grab/png_encode/verify_and_save/complete. Failed
+capture preserves completed input and returns no image. DWM-cloaked windows are
+excluded from occlusion checks; visible foreign windows remain blockers and are
+identified by HWND/PID/class without titles. Check coverage/geometry again after
+the screen read. Exact Unity/Edge failures still need application-specific retests.
+
 Mouse state uses explicit down/motion/up events per Microsoft's
 [MOUSEINPUT contract](https://learn.microsoft.com/en-us/windows/win32/api/winuser/ns-winuser-mouseinput).
 An accepted [SendInput](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-sendinput)

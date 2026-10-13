@@ -153,6 +153,11 @@ before relying on concurrent work with it.
 
 ## Screenshots and waiting
 
+For browser toolbar inspection/actions blocked by a deep webpage, use
+`get_elements(scope="non_document")` and the same scope on `click_element` or
+`read_element`. Document roots/subtrees are excluded; uniqueness and strict
+depth/node checks still apply to the remaining tree.
+
 `capture_screen` gives full pixels and summary, `screenshot` just the full
 image, and `capture_region(x1,y1,x2,y2)` supplies a cropped image and its offset.
 Crops and journal images may be resized by the client; their displayed pixel
@@ -163,6 +168,12 @@ PrintWindow can capture a covered target. If it cannot and another visible
 window overlaps the target, capture errors instead of showing that window.
 Use `get_elements`/`read_element`, or uncover the target manually. The server
 never brings the window forward to repair a screenshot.
+
+For partially black GPU-rendered content, pass `capture_mode="screen"` to
+`screenshot`, `capture_screen` or `capture_region`. This bypasses PrintWindow but
+keeps foreign-occlusion and geometry checks. Occlusion diagnostics contain
+covering HWND/PID/class without window titles; DWM-cloaked windows are ignored.
+Optional journal image errors do not turn completed mutations into failures.
 
 `wait_for(name)` polls the bounded interactive-element inspection list for an
 exact/substring name. It can report multiple matches; it is a presence check,

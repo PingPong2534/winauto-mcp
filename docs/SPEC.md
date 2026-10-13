@@ -21,6 +21,26 @@ second; automation IDs match exactly. Action selection refuses multiple
 matches. Action traversal refuses a truncated or unreadable tree rather than assuming uniqueness from a partial search. `get_elements` is an inspection list, not
 permission to operate a canvas or unsupported pattern.
 
+`get_elements`, `read_element` and `click_element` accept scope=non_document:
+exclude Document roots/subtrees, then enforce uniqueness/limits across the full
+remaining tree. Default scope=window retains whole-window semantics.
+
+`capture_screen`, `screenshot` and `capture_region` accept capture_mode=screen
+to bypass PrintWindow for partially omitted GPU content, preserving visible
+occlusion/geometry checks. Default auto retains PrintWindow first. DWM-cloaked
+windows do not occlude; refusals identify HWND/PID/class, never window titles.
+Optional journal captures suppress capture/cleanup exceptions after confirmed
+actions. Borrowed GetWindowDC handles are released with ReleaseDC, not DeleteDC.
+
+Foreground click/drag accept distinct ctrl/shift/alt modifiers through button-up.
+Key chords use scan codes with hold_ms=80 (20..500 ms), not simultaneous down/up.
+Tracked keys/buttons release on partial sends, failures, cancellation and the
+watchdog path; inspect keys_released and mouse_buttons_released before recovery.
+Optional capture imports load before input blocking. Driver capture/PNG work
+is bounded to 1 s, reserving 300 ms of the original lease for cleanup.
+capture_phase preserves progress diagnostics; completed input is never replayed.
+These contracts do not establish Unity/Edge application-level acceptance.
+
 list_windows excludes minimized, hidden and untitled windows and returns
 hwnd/title/process, plus integrity information for blocked writes, without
 rectangles. UIA element rects and action/crop regions use attached-client

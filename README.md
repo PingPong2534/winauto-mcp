@@ -128,6 +128,16 @@ of the control's bounds at the interaction, not a live UIA tracker after layout 
 
 ## Conditional hybrid automation
 
+For browser toolbars blocked by a deep webpage tree, inspect with
+`get_elements(scope="non_document")` and use that scope on `click_element` or
+`read_element`. Document roots/subtrees are excluded; uniqueness and traversal
+limits remain enforced within the scope.
+
+For partially black GPU surfaces, `screenshot(capture_mode="screen")` (also
+available on `capture_screen`/`capture_region`) uses visible pixels with foreign
+occlusion/geometry guards. Default `auto` still prefers PrintWindow. Occlusion
+refusals identify covering HWND/PID/class without exposing window titles.
+
 Use `guarded_steps` for several existing controls. The server binds their UIA
 identities before mutations, checks `before`/`expect` state, and can compare each
 action's region with an observed baseline through Pillow or OpenCV. Semantic-only
@@ -173,6 +183,14 @@ See [temporary-control usage](skills/winauto-mcp/references/temporary-control.md
 and [research/design](docs/temporary-control.md).
 
 ## Other tools
+
+Foreground click/drag steps accept `modifiers=["ctrl","shift"]` (distinct subsets
+of ctrl/shift/alt), held through button-up. Key steps accept `hold_ms=80`
+(20..500 ms) and send scan-code down/up separately. Inspect `keys_released` and
+`mouse_buttons_released` after failures. Optional capture work is bounded to 1 s
+and reserves 300 ms for cleanup; `capture_phase` identifies the stalled phase.
+Completed input persists when capture fails. Unity/Edge-specific response still
+requires target-app verification.
 
 The 36 tools also include cropped screenshots, pixel location/cache helpers,
 element-presence waits, snapshots/diffs, scripted steps, journal replay,

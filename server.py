@@ -355,7 +355,9 @@ def _try_grab():
         return None
     try:
         return grab_window(hwnd)
-    except (ValueError, OSError):
+    except Exception:
+        # Optional journal pixels must never hide a confirmed mutation result,
+        # including pywin32 GDI errors while the invoked target is closing.
         return None
 
 
@@ -475,14 +477,22 @@ def detach_window() -> str:
     return "detached"
 
 
+def _capture_mode(hwnd, mode):
+    if mode not in ("auto", "screen"):
+        raise ValueError('capture_mode must be auto or screen')
+    return grab_window(hwnd) if mode == "auto" else grab_window(hwnd, allow_occluded=False)
+
+
 @tool
-def capture_screen():
+def capture_screen(capture_mode: str = "auto"):
     """Screenshot the attached window's client area, plus a text summary of
     interactive elements found via UI Automation (buttons, inputs, menus, ...).
     If the app renders to a canvas (e.g. a game) the UIA summary will be empty
-    -- inspection still works, but canvas-only controls cannot be activated."""
+    -- inspection still works, but canvas-only controls cannot be activated.
+    capture_mode=screen uses guarded visible pixels for GPU surfaces that
+    PrintWindow omits; auto tries PrintWindow first. Screen mode refuses occlusion."""
     hwnd = _require_attached()
-    frame = grab_window(hwnd)
+    frame = _capture_mode(hwnd, capture_mode)
     _mark_seen(frame)
     journal_frame(frame)
     png_bytes = to_png(frame)
@@ -493,19 +503,20 @@ def capture_screen():
 
 
 @tool
-def screenshot():
+def screenshot(capture_mode: str = "auto"):
     """Screenshot the attached window's client area only -- no UIA tree walk,
     much faster than capture_screen. Use this when you just need to look at
-    the screen again (e.g. after a click) and don't need the element list."""
+    the screen again (e.g. after a click) and don't need the element list.
+    capture_mode=screen bypasses PrintWindow, preserving occlusion guards."""
     hwnd = _require_attached()
-    frame = grab_window(hwnd)
+    frame = _capture_mode(hwnd, capture_mode)
     _mark_seen(frame)
     journal_frame(frame)
     return Image(data=to_png(frame), format="png")
 
 
 @tool
-def capture_region(x1: int, y1: int, x2: int, y2: int):
+def capture_region(x1: int, y1: int, x2: int, y2: int, capture_mode: str = "auto"):
     """Screenshot ONE PART of the attached window instead of all of it, given
     a client-relative rect. Use this whenever you only need to check one thing
     -- did the dialog appear, did the value in that field update, is the button
@@ -518,6 +529,7 @@ def capture_region(x1: int, y1: int, x2: int, y2: int):
     offset. As always, do not eyeball a click coordinate off the image --
     call locate_in_region on the same rect to get an exact point.
 
+    capture_mode=screen uses guarded visible pixels instead of PrintWindow.
     Looking at a region counts as having looked at THAT REGION ONLY. click()
     tracks this per area, so a click inside the part you just checked goes
     through, while one aimed at a part of the window you have not looked at
@@ -525,7 +537,7 @@ def capture_region(x1: int, y1: int, x2: int, y2: int):
     of the sidebar fresh again. Use screenshot() when you do need everything.
     """
     hwnd = _require_attached()
-    frame = grab_window(hwnd)
+    frame = _capture_mode(hwnd, capture_mode)
     w, h = frame.size
     rect = (max(0, min(x1, w)), max(0, min(y1, h)), max(0, min(x2, w)), max(0, min(y2, h)))
     if rect[2] <= rect[0] or rect[3] <= rect[1]:
@@ -555,19 +567,21 @@ def capture_region(x1: int, y1: int, x2: int, y2: int):
 
 
 @tool
-def get_elements() -> str:
+def get_elements(scope: str = "window") -> str:
     """UI Automation element list for the attached window only (no screenshot),
     as JSON with name, automation_id, control_type, enabled, actions,
     control_steps and rect. control_steps lists capabilities for control_set.
-    rect is client-relative, same space as capture_screen's image."""
+    rect is client-relative, same space as capture_screen's image.
+    scope=non_document excludes Document roots/subtrees for browser toolbars;
+    window (default) inspects the whole window."""
     hwnd = _require_attached()
-    return json.dumps(uia_inspect.get_elements(hwnd), ensure_ascii=False)
+    return json.dumps(uia_inspect.get_elements(hwnd, scope=scope), ensure_ascii=False)
 
 
 @tool
-def read_element(name: str | None = None, automation_id: str | None = None) -> str:
-    """Read a uniquely identified UIA element's value and selection/toggle state."""
-    return json.dumps(input_sim.read_element(_require_attached(), name, automation_id),
+def read_element(name: str | None = None, automation_id: str | None = None, scope: str = "window") -> str:
+    """Read unique UIA state. scope=non_document excludes Document subtrees."""
+    return json.dumps(input_sim.read_element(_require_attached(), name, automation_id, scope),
                       ensure_ascii=False)
 
 
@@ -602,9 +616,10 @@ def foreground_steps(steps: list[dict], reason: str, timeout_ms: int = 3000,
                      allow_takeover: bool = False):
     """Explicit temporary focus + real-input batch for focus-dependent UI.
     Requires allow_takeover=True and a short visible reason. 1..20 steps:
-    click(x,y,button=left|right), drag(x1,y1,x2,y2,button=left|right,duration_ms=500),
+    click(x,y,button=left|right,modifiers=[]),
+    drag(x1,y1,x2,y2,button=left|right,duration_ms=500,modifiers=[]),
     hover(x,y,dwell_ms=500), scroll(x,y,clicks),
-    type(text,replace=False), key(keys=[lowercase names]), wait(ms), and optional
+    type(text,replace=False), key(keys=[lowercase names],hold_ms=80), wait(ms), and optional
     final capture(region=[x1,y1,x2,y2]). Coordinates remain client-relative;
     pointer targets must belong to the attached window or its owned popup.
     timeout_ms=1000..8000 includes announcement, actions and cleanup; no renewal.
@@ -615,7 +630,12 @@ def foreground_steps(steps: list[dict], reason: str, timeout_ms: int = 3000,
     removes its hooks. No hooks exist outside the short foreground batch.
     Lock/activation failure stops; no unlocked input or forced foreground hack.
     Check report.ok/completed_steps; interrupted step outcome can be unknown.
-    Capture is fresh visible client pixels before focus release, no stale image.
+    Modifiers are distinct ctrl/shift/alt names held through pointer button-up.
+    Keys use scan codes held for 20..500 ms; all tracked keys/buttons release on
+    failure/cancellation. Successful delivery does not prove application response.
+    Capture is fresh visible client pixels before focus release, no stale image;
+    optional capture work is bounded to 1 s with 300 ms reserved for cleanup.
+    capture_phase identifies progress/timeouts; inspect before retrying input.
     """
     hwnd = _require_attached()
     report, png = foreground_control.run(hwnd, steps, reason, timeout_ms, allow_takeover)
@@ -666,12 +686,13 @@ def click(
 
 @tool
 def click_element(name: str | None = None, button: str = "left",
-                  double: bool = False, automation_id: str | None = None) -> str:
+                  double: bool = False, automation_id: str | None = None, scope: str = "window") -> str:
     """Activate one UIA element by unique name or automation_id.
     Names match exactly first, then by substring; ambiguity is refused.
     An edit becomes the logical text target without changing Windows focus.
-    Right/double clicks are unsupported."""
-    result = input_sim.click_element(_require_attached(), name, automation_id, button, double)
+    Right/double clicks are unsupported. scope=non_document excludes Document
+    roots/subtrees; uniqueness and tree limits still apply inside that scope."""
+    result = input_sim.click_element(_require_attached(), name, automation_id, button, double, scope)
     return json.dumps(result, ensure_ascii=False)
 
 

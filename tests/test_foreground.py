@@ -98,13 +98,147 @@ class ForegroundTests(unittest.TestCase):
     def native_mouse(self):
         native = object.__new__(control.NativeInput)
         native.held_mouse = 0
+        native.held_keys = {}
         native.stopping = False
         native.dispatch_lock = threading.Lock()
         native.tag = 123
         native.guard = Mock()
         native.user = Mock()
+        native.user.MapVirtualKeyW.side_effect = lambda vk, mode: {13: 0x1C, 27: 0x01,
+            16: 0x2A, 17: 0x1D, 18: 0x38, 38: 0xE048}.get(vk, 0x1E)
         native.user.SendInput.side_effect = lambda count, events, size: count
         return native
+
+    def test_modifiers_and_key_hold_validation_before_any_takeover(self):
+        click = {'do': 'click', 'x': 20, 'y': 20}
+        control.validate([dict(click, modifiers=['ctrl', 'shift'])], 'test', 3000, True)
+        for modifiers in ('shift', ['shift', 'shift'], ['win'], [1], None):
+            with self.subTest(modifiers=modifiers), self.assertRaises(ValueError):
+                control.validate([dict(click, modifiers=modifiers)], 'test', 3000, True)
+        for hold in (0, 19, 501, True, 1.5):
+            with self.subTest(hold=hold), self.assertRaises(ValueError):
+                control.validate([{'do': 'key', 'keys': ['enter'], 'hold_ms': hold}], 'test', 3000, True)
+        with self.assertRaisesRegex(ValueError, 'no time'):
+            control.validate([{'do': 'key', 'keys': ['enter'], 'hold_ms': 500},
+                              {'do': 'key', 'keys': ['escape'], 'hold_ms': 500}], 'test', 1000, True)
+
+    def test_scan_code_down_interval_and_key_up_after_cancellation(self):
+        for key, scan, flags in (('enter', 0x1C, 8), ('escape', 1, 8), ('up', 0x48, 9)):
+            for cancelled in (False, True):
+                with self.subTest(key=key, cancelled=cancelled):
+                    native = self.native_mouse()
+                    native.keyboard_guard = Mock()
+                    def wait(ms, guard):
+                        self.assertEqual(ms, 100)
+                        self.assertEqual(list(native.held_keys), [(0, scan, flags)])
+                        self.assertEqual(native.user.SendInput.call_count, 1)
+                        if cancelled:
+                            raise RuntimeError('Escape')
+                    if cancelled:
+                        with self.assertRaisesRegex(RuntimeError, 'Escape'):
+                            native.key([key], 100, wait)
+                    else:
+                        native.key([key], 100, wait)
+                    self.assertFalse(native.held_keys)
+                    up = native.user.SendInput.call_args.args[1][0].ki
+                    self.assertEqual((up.wVk, up.wScan, up.dwFlags), (0, scan, flags | 2))
+
+    def test_modifier_pointer_gestures_hold_through_button_up_and_release_on_failure(self):
+        for gesture in ('click', 'drag'):
+            for cancelled in (False, True):
+                with self.subTest(gesture=gesture, cancelled=cancelled):
+                    native = self.native_mouse()
+                    native.point = Mock()
+                    native.check_point = Mock()
+                    observed = []
+                    def dispatch(count, events, size):
+                        for event in events:
+                            if event.type == 0:
+                                observed.append((event.mi.dwFlags, len(native.held_keys)))
+                                if cancelled and event.mi.dwFlags & 2:
+                                    raise RuntimeError('partial')
+                        return count
+                    native.user.SendInput.side_effect = dispatch
+                    def action():
+                        if gesture == 'click':
+                            native.click(20, 20, modifiers=['ctrl', 'shift'])
+                        else:
+                            native.drag(20, 20, 120, 20, 'left', 100, Mock(), ['ctrl', 'shift'])
+                    if cancelled:
+                        with self.assertRaisesRegex(RuntimeError, 'partial'):
+                            action()
+                    else:
+                        action()
+                    self.assertTrue(observed)
+                    self.assertTrue(all(count == 2 for _, count in observed))
+                    self.assertEqual(native.held_mouse, 0)
+                    self.assertFalse(native.held_keys)
+
+    def test_partial_key_dispatch_and_watchdog_cleanup_release_all_possible_downs(self):
+        native = self.native_mouse()
+        native.user.SendInput.side_effect = [1, 2]  # only first of two downs accepted
+        with self.assertRaisesRegex(RuntimeError, 'partial'):
+            native.send([native._key_event('ctrl'), native._key_event('shift')])
+        self.assertEqual(len(native.held_keys), 2)
+        native.guard.side_effect = RuntimeError('foreground escaped')
+        native.release_inputs()
+        self.assertFalse(native.held_keys)
+        self.assertTrue(native.stopping)
+        events = native.user.SendInput.call_args.args[1]
+        self.assertTrue(all(event.ki.dwFlags & 2 for event in events))
+
+    def test_failed_key_release_skips_restore_and_still_releases_gate(self):
+        native = Mock()
+        native.release_keys.side_effect = RuntimeError('key-up refused')
+        report, _, _, _ = self.execute(native)
+        self.assertFalse(report['ok'])
+        self.assertFalse(report['keys_released'])
+        native.restore.assert_not_called()
+        native.unblock.assert_called_once()
+
+    def test_capture_preparation_precedes_gate_and_failed_capture_preserves_click(self):
+        calls, native, indicator = Mock(), Mock(), Mock()
+        calls.attach_mock(native, 'native')
+        calls.attach_mock(indicator, 'indicator')
+        indicator.capture.side_effect = TimeoutError('optional capture timed out during screen_grab')
+        request = self.request()
+        request['steps'] = [request['steps'][0], {'do': 'capture'}]
+        snapshots = []
+        report = control.execute(request, native, indicator, lambda r: snapshots.append(copy.deepcopy(r)))
+        names = [c[0] for c in calls.mock_calls]
+        self.assertLess(names.index('indicator.prepare_capture'), names.index('native.block'))
+        self.assertEqual(report['completed_steps'], 1)
+        self.assertEqual(report['stopped_at_step'], 1)
+        self.assertEqual(report['phase'], 'released')
+        self.assertTrue(report['keys_released'])
+        self.assertTrue(report['mouse_buttons_released'])
+        native.click.assert_called_once()
+        native.unblock.assert_called_once()
+
+    def test_worker_keeps_gc_off_capture_threads_and_collects_in_active_apartment(self):
+        import gc
+        import pythoncom
+        events = []
+        owner = threading.get_ident()
+        original = gc.isenabled()
+        try:
+            for enabled in (True, False):
+                (gc.enable if enabled else gc.disable)()
+                events.clear()
+                def collect():
+                    self.assertEqual(events, ['enter'])
+                    self.assertEqual(threading.get_ident(), owner)
+                    self.assertFalse(gc.isenabled())
+                    events.append('collect')
+                with patch.object(pythoncom, 'CoInitializeEx', side_effect=lambda flags: events.append('enter')), \
+                     patch.object(pythoncom, 'CoUninitialize', side_effect=lambda: events.append('exit')), \
+                     patch.object(gc, 'collect', side_effect=collect):
+                    with control.worker_apartment():
+                        self.assertFalse(gc.isenabled())
+                self.assertEqual(events, ['enter', 'collect', 'exit'])
+                self.assertEqual(gc.isenabled(), enabled)
+        finally:
+            (gc.enable if original else gc.disable)()
 
     def test_drag_validation_budget_and_explicit_standalone_opt_in(self):
         step = {'do': 'drag', 'x1': 20, 'y1': 40, 'x2': 120, 'y2': 80}

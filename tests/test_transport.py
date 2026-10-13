@@ -35,6 +35,12 @@ class TransportTests(unittest.TestCase):
                     self.assertEqual(control.input_schema["properties"]["steps"]["type"], "array")
                     attach = next(tool for tool in listing.tools if tool.name == "attach_window")
                     self.assertEqual(attach.input_schema["properties"]["label"]["type"], "string")
+                    for name in ('get_elements', 'click_element', 'read_element'):
+                        tool = next(tool for tool in listing.tools if tool.name == name)
+                        self.assertEqual(tool.input_schema['properties']['scope']['default'], 'window')
+                    for name in ('screenshot', 'capture_screen', 'capture_region'):
+                        tool = next(tool for tool in listing.tools if tool.name == name)
+                        self.assertEqual(tool.input_schema['properties']['capture_mode']['default'], 'auto')
                     drag = next(tool for tool in listing.tools if tool.name == "drag")
                     self.assertFalse(drag.input_schema['properties']['allow_takeover']['default'])
                     self.assertEqual(drag.input_schema['properties']['duration_ms']['default'], 500)
