@@ -105,6 +105,11 @@ Choose a new output directory. `--reuse-unity` reuses that directory's existing
 fixture build; rebuild in a new directory after changing fixture sources.
 `--editor-only --reuse-unity` reruns only the isolated Editor fixture.
 Generated projects are reusable fixture outputs; screenshots/logs remain local.
+If the `--unity` executable is unavailable as a file or on PATH, Unity probes
+are skipped with a reason in evidence.json and stderr; requested Edge probes
+still run. An all-skipped invocation exits successfully with status=skipped,
+passed=null, and no MCP/app launch. Existing-Editor build/probe failures remain
+failures. Default tests/smoke.py never requires or launches a Unity installation.
 
 ### Follow-up validation record
 

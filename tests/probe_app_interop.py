@@ -1,6 +1,7 @@
 """Opt-in real MCP probes for #11/#13/#14, using only isolated synthetic apps.
 
 Run with --output <empty directory> --edge <msedge.exe> and/or --unity <Unity.exe>.
+Unavailable Unity Editor executables skip only Unity probes, without installation.
 Never discovered by smoke.py. Retain fixtures/evidence for concrete regression reuse.
 Each takeover is a bounded normal foreground_steps call; no alternate injector.
 """
@@ -29,6 +30,25 @@ from mcp.client.stdio import stdio_client
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = Path(__file__).resolve().parent / 'fixtures'
+
+
+def unity_executable(value):
+    if not value:
+        return None
+    candidate = Path(value).expanduser()
+    if candidate.is_file():
+        return str(candidate.resolve())
+    return shutil.which(value)
+
+
+def finish(probe, completed, skipped):
+    # An all-skipped run succeeds as a CLI operation, but is not a test pass.
+    summary = {'status': 'passed' if completed else 'skipped',
+               'passed': True if completed else None,
+               'completed': completed, 'skipped': skipped}
+    probe.evidence.update(summary)
+    probe.save()
+    print(json.dumps({**summary, 'evidence': str(probe.output / 'evidence.json')}))
 
 
 def wait_value(fn, timeout=60):
@@ -276,25 +296,38 @@ async def main(args):
     previous = args.output / 'evidence.json'
     if previous.exists():
         previous.rename(args.output / f'evidence-{time.time_ns()}.json')
+    probe = Probe(None, args.output)
+    completed, skipped = [], []
+    unity = unity_executable(args.unity)
+    if args.unity and unity is None:
+        skipped.append('unity')
+        probe.evidence['unity-probe'] = {'status': 'skipped',
+            'reason': 'Unity Editor executable not found', 'requested_executable': args.unity}
+        print('SKIP Unity: Unity Editor executable not found; no installation or Unity smoke test attempted.',
+              file=sys.stderr)
+    if not args.edge and unity is None:
+        finish(probe, completed, skipped)
+        return  # Do not even start an MCP server for an all-skipped run.
     params = StdioServerParameters(command=sys.executable, args=[str(ROOT / 'server.py')],
         cwd=str(args.output), env={'TEMP': str(args.output), 'TMP': str(args.output)})
     async with stdio_client(params) as (read, write):
         async with ClientSession(read, write, read_timeout_seconds=1200) as session:
             await session.initialize()
-            probe = Probe(session, args.output)
+            probe.session = session
             probe.evidence['server'] = {'checkout': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT).decode().strip(),
                 'dirty': bool(subprocess.check_output(['git', 'status', '--porcelain'], cwd=ROOT).strip()),
                 'module_sha256': {name: hashlib.sha256((ROOT / name).read_bytes()).hexdigest()
                     for name in ('server.py', 'foreground_control.py', 'screenshot.py', 'takeover_indicator.py')}}
             if args.edge:
                 await probe.edge(args.edge)
-            if args.editor_only:
-                await probe.unity_editor(args.unity, args.output / 'unity-project')
-            elif args.unity:
-                await probe.unity(args.unity, args.reuse_unity)
-            probe.evidence['passed'] = True
-            probe.save()
-            print(json.dumps({'passed': True, 'evidence': str(args.output / 'evidence.json')}))
+                completed.append('edge')
+            if unity:
+                if args.editor_only:
+                    await probe.unity_editor(unity, args.output / 'unity-project')
+                else:
+                    await probe.unity(unity, args.reuse_unity)
+                completed.append('unity')
+            finish(probe, completed, skipped)
 
 
 if __name__ == '__main__':

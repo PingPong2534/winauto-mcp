@@ -199,6 +199,10 @@ for the target's cross-thread acknowledgement without retrying lost focus.
 The opt-in `tests/probe_app_interop.py` tests isolated Edge WebGL and Unity
 UI Toolkit/DX12 fixtures through real MCP stdio. Its release player disables
 profiler/debugger listeners, avoiding Development Player firewall prompts.
+If the requested Unity Editor executable is absent (both file path and PATH),
+the runner reports Unity as skipped and continues requested Edge probes. An
+all-skipped run returns status=skipped and passed=null, without starting MCP or
+installing Unity. The default smoke.py suite never launches Unity.
 
 The 36 tools also include cropped screenshots, pixel location/cache helpers,
 element-presence waits, snapshots/diffs, scripted steps, journal replay,

@@ -13,6 +13,9 @@
 
 # Validation
 
+- Skip Unity smoke/integration probes when Unity Editor is unavailable; record
+  the skip and continue other checks. Do not install Unity for smoke tests.
+  Keep failures from an available Editor as failures.
 - Keep `skills/winauto-mcp/references/tools.md` aligned with registered server tools.
 - For installer changes, test native Codex/Claude plugin registration with isolated
   client homes, verify copied skills and MCP descriptors, and perform a real stdio
