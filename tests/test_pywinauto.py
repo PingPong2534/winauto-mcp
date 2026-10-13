@@ -272,14 +272,16 @@ class BackgroundTests(unittest.TestCase):
         rect = tuple(report["capture"]["region"])
         expected = screenshot.grab_window(self.window.hwnd).crop(rect)
         self.assertEqual(image.size, (rect[2] - rect[0], rect[3] - rect[1]))
+        proof = os.environ.get("WINAUTO_CONTROL_PROOF")
+        if proof:
+            image.save(proof)
+            expected.save(str(pathlib.Path(proof).with_stem(pathlib.Path(proof).stem + '-expected')))
+            ImageChops.difference(image, expected).save(str(pathlib.Path(proof).with_stem(pathlib.Path(proof).stem + '-diff')))
         self.assertIsNone(ImageChops.difference(image, expected).getbbox())
         self.assertEqual(report["capture"]["coordinate_offset"], list(rect[:2]))
         self.assertEqual(server._state["seen"][-1]["rect"], rect)
         self.assertEqual(len(server._state["seen"]), 1)
         self.assertTrue(win32gui.IsWindowVisible(self.cover))
-        proof = os.environ.get("WINAUTO_CONTROL_PROOF")
-        if proof:
-            image.save(proof)
         append = server.control_set(automation_id="101", steps=[
             {"do": "type", "text": " ต่อท้าย"}, {"do": "capture"}], delay_ms=0)
         self.assertTrue(json.loads(append[0])["ok"])

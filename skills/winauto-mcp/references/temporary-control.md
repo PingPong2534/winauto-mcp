@@ -115,7 +115,8 @@ allowed only as the last step; unlike `control_set`, capture is not required.
   SendInput events. Gate failure prevents focus/input changes. Never automatically
   elevate or inject without the gate. This is not a secure desktop/device lock.
 - Activation tries SetForegroundWindow/native UIA SetFocus and verifies the
-  actual foreground. If neither works, abort. No Alt-key tricks, AttachThreadInput
+  actual foreground after a bounded WM_NULL acknowledgement (up to 200 ms).
+  Lost-focus errors identify HWND/PID/class without titles. If neither works, abort. No Alt-key tricks, AttachThreadInput
   or changed system settings are used.
 - Focus is kept across actions and final capture, then prior cursor/focus
   restoration is attempted before unblocking. Restoration is best effort, not
@@ -156,9 +157,11 @@ Inspect report `ok`, `completed_steps`, `stopped_at_step`, `steps`, `error`,
 release has `phase="released"`; check `ok` as well because failed actions can
 still release normally. Restoration flags describe the cleanup result, not
 business success. Completed actions are not rolled back. A
-watchdog/worker crash records confirmed completed steps but the interrupted
-step outcome is unknown; cursor/focus restoration may not have run. Input is
-released by worker exit. Read the current app state before retrying, especially
+watchdog/worker crash records `worker_exit_phase` and confirmed completed steps;
+an interrupted step can be unknown. `release_confirmed=true` preserves durable
+key/button and cursor/focus cleanup results when only post-release work died.
+Otherwise release flags are null and input hooks are removed by worker exit.
+Read the current app state before retrying, especially
 for append, toggle, submit or selection. Never replay the entire failed batch.
 
 Use read_element/get_elements to verify committed state after release. Inspect
