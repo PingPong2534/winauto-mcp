@@ -39,11 +39,25 @@ browser toolbar. Use the same scope for inspection and action. Strict uniqueness
 depth and node guards apply throughout the remaining tree. The default `window`
 scope retains whole-window lookup; scoped mode cannot select webpage content.
 
+`click_element`, `read_element` and `type_text` also accept `runtime_id=None`.
+Pass the opaque integer array from current inspection to select that exact
+identity within the attached window. Unrelated incomplete subtrees do not
+invalidate identity uniqueness; depth/node/scope limits still apply and a missing
+ID refuses without replacement. Additional name/ID selectors must also match.
+Runtime IDs can be reused over time; reinspect after navigation/replacement.
+This does not relax coordinate/name uniqueness guards or enable real input.
+
 `capture_screen`, `screenshot` and `capture_region` accept `capture_mode="screen"`
 for visible GPU content partially omitted by PrintWindow. Default `auto` tries
 PrintWindow first. Screen mode keeps foreign-occlusion and geometry guards and
 does not raise the target. Refusals identify covering HWND/PID/class without
 window titles. DWM-cloaked windows are excluded; visible covers still refuse.
+`auto` rejects PrintWindow when target-native and physical dimensions differ
+under DPI virtualization, then uses the same guarded screen path. Covered scaled
+legacy windows may therefore refuse instead of returning black-padded pixels.
+Foreign WinAuto overlays remain covers, including click-through/color-key ones;
+their borders/highlights can contribute pixels. The server hides only its own
+attachment decoration, never another instance's overlay.
 
 ### `get_elements`
 
@@ -57,7 +71,7 @@ refuses ambiguity or an incomplete search instead of picking a partial match.
 
 ### `read_element`
 
-`read_element(name=None, automation_id=None, scope="window")` returns the selected control's
+`read_element(name=None, automation_id=None, scope="window", runtime_id=None)` returns the selected control's
 description plus available `value`, `read_only`, `toggle_state`, `selected`,
 `range_value`. Password text is omitted. Use a unique ID/name to verify state
 before toggles or after asynchronous app updates; missing pattern properties
@@ -94,7 +108,7 @@ than the returned crop. Never infer coordinates from client-resized images.
 
 ### `click_element`
 
-`click_element(name=None, button="left", double=False, automation_id=None, scope="window")`
+`click_element(name=None, button="left", double=False, automation_id=None, scope="window", runtime_id=None)`
 activates one uniquely selected, enabled control. Returns JSON with `action`,
 `element` and `backend`. Prefer this over coordinates. Buttons use InvokePattern,
 checkboxes TogglePattern, items/radios/tabs SelectionItemPattern, expandable
@@ -113,7 +127,7 @@ Right/double/modifier clicks are refused; `keep_cursor` has no effect.
 
 ### `type_text`
 
-`type_text(text,name=None,automation_id=None,replace=False)` writes literal
+`type_text(text,name=None,automation_id=None,replace=False,runtime_id=None)` writes literal
 Unicode through ValuePattern and verifies readback. Returns action
 `appended`/`replaced`, input character count, automation ID and `verified`.
 Default appends to the end of the entire value; `replace=True` sets the whole
@@ -437,7 +451,10 @@ True errors. It never establishes a foreground hold or restores prior focus.
 
 `keyboard_status()` returns passive backend/status JSON: blocking, watching and
 blocking_enabled are False, lease is zero, human-key counts/times are unavailable.
-It does not observe the person's typing or make scripts pause for human input.
+`held_virtual_keys` is one passive snapshot of numeric virtual-key down states;
+it records no character text or event stream and cannot identify physical versus
+injected origin. Acquisition refusals also report these codes. It does not clear
+held keys or manage the gate of an active foreground call.
 
 ### `release_keyboard`
 

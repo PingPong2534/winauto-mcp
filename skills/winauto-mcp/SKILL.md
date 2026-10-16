@@ -78,6 +78,18 @@ control reference for targeting and off-client capture limits.
 Each attach resets the logical text target, snapshots, seen regions and journal
 session. Reuse the attachment while working in the same window.
 
+For duplicate/unnamed webpage controls blocked by a global uniqueness scan,
+pass the currently inspected `runtime_id` to `click_element`, `read_element` or
+`type_text`. Exact identity lookup remains bounded to the attached window and
+scope; missing IDs refuse without a replacement. Runtime IDs are temporary and
+may be reused: reinspect after navigation/replacement. Coordinate/name lookups
+keep their strict guards; `force=True` cannot bypass tree limits.
+
+`auto` capture rejects DPI-virtualized PrintWindow dimensions and uses guarded
+visible pixels. If covered, uncover the target or inspect UIA; do not use padded
+pixels as coordinate evidence. Another instance's overlay is a real potential
+pixel cover; never exempt it by window class or hide another session's overlay.
+
 The green frame follows the attached client area. The feature label sits outside
 it; the red box marks the last successful UIA interaction's bounds. Foreground
 batches do not update that marker. These indicate targeting, not proof of

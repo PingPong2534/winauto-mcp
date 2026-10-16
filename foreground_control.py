@@ -19,6 +19,7 @@ import threading
 import time
 
 MAX_TIMEOUT_MS = 8000
+CLEANUP_TIMEOUT_S = 0.25
 KEYS = {'enter': 0x0D, 'tab': 0x09, 'escape': 0x1B, 'up': 0x26,
         'down': 0x28, 'left': 0x25, 'right': 0x27, 'home': 0x24,
         'end': 0x23, 'backspace': 0x08, 'delete': 0x2E,
@@ -194,6 +195,22 @@ class _GuiThreadInfo(ctypes.Structure):
                 ('hwndMoveSize', wt.HWND), ('hwndCaret', wt.HWND), ('rcCaret', wt.RECT)]
 
 
+def held_virtual_keys(api=None):
+    """One passive async-state sample, without hooks, character text or history."""
+    if api is None:
+        import win32api
+        api = win32api
+    return [key for key in range(1, 256) if api.GetAsyncKeyState(key) & 0x8000]
+
+
+class HeldInputError(RuntimeError):
+    def __init__(self, keys):
+        self.keys = keys
+        super().__init__(f'a key/button is held; held_virtual_keys={keys}; '
+                         'origin is unknown (physical or injected); '
+                         'release it before requesting temporary control')
+
+
 class NativeInput:
     def __init__(self, hwnd, pid):
         import win32gui
@@ -253,8 +270,9 @@ class NativeInput:
                                f'foreground={details}')
 
     def block(self):
-        if any(self.api.GetAsyncKeyState(n) & 0x8000 for n in range(1, 256)):
-            raise RuntimeError('a human key/button is held; release it before requesting temporary control')
+        held = held_virtual_keys(self.api)
+        if held:
+            raise HeldInputError(held)
         from input_gate import InputGate
         self.gate = InputGate(self.tag)
         self.gate.start()
@@ -567,6 +585,9 @@ def execute(request, native, indicator, publish):
         report.pop('stopped_at_step', None)
     except Exception as exc:
         report['error'] = str(exc)
+        if isinstance(exc, HeldInputError):
+            report['held_virtual_keys'] = exc.keys
+            report['held_input_origin'] = 'unknown; async state does not distinguish physical and injected input'
     finally:
         if locked:
             cleanup_progress('releasing_inputs')
@@ -604,7 +625,16 @@ def watchdog(parent_pid, timeout_ms, done, cleanup=None):
     def terminate(code):
         try:
             if cleanup:
-                cleanup()
+                # SendInput itself can stall. Cleanup must not disable the deadline
+                # or leave the worker's global hooks alive indefinitely.
+                def attempt():
+                    try:
+                        cleanup()
+                    except Exception:
+                        pass  # release remains unconfirmed in the durable report
+                thread = threading.Thread(target=attempt, daemon=True)
+                thread.start()
+                thread.join(CLEANUP_TIMEOUT_S)
         finally:
             os._exit(code)
 

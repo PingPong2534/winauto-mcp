@@ -52,6 +52,30 @@ class ForegroundTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'message pump'):
             gate.check()
 
+    def test_held_input_refusal_reports_exact_vks_without_claiming_human_origin(self):
+        native = self.native_mouse()
+        native.api = Mock()
+        native.api.GetAsyncKeyState.side_effect = lambda key: 0x8000 if key in (17, 231) else 0
+        with patch('input_gate.InputGate') as gate:
+            report, _, _, _ = self.execute(native)
+            gate.assert_not_called()
+        self.assertFalse(report['ok'])
+        self.assertEqual(report['completed_steps'], 0)
+        self.assertEqual(report['held_virtual_keys'], [17, 231])
+        self.assertIn('unknown', report['held_input_origin'])
+        self.assertNotIn('human key', report['error'])
+        native.guard.assert_not_called()
+        native.user.SendInput.assert_not_called()
+
+    def test_keyboard_status_samples_down_bits_without_hooks_or_recovery_input(self):
+        api = Mock()
+        api.GetAsyncKeyState.side_effect = lambda key: 1 if key == 18 else (0x8000 if key == 231 else 0)
+        self.assertEqual(control.held_virtual_keys(api), [231])
+        with patch.object(control, 'held_virtual_keys', return_value=[231]):
+            status = json.loads(server.keyboard_status())
+        self.assertEqual(status['held_virtual_keys'], [231])
+        self.assertFalse(status['watching'])
+
     def request(self):
         return {'reason': 'Test suggestion box', 'timeout_ms': 3000, 'folder': '.',
                 'steps': [{'do': 'click', 'x': 25, 'y': 30}, {'do': 'type', 'text': 'ไทย🙂'},
@@ -415,6 +439,16 @@ class ForegroundTests(unittest.TestCase):
                                     creationflags=subprocess.CREATE_NO_WINDOW, timeout=4)
             self.assertEqual(worker.returncode, 124)
             self.assertEqual(marker.read_text(), 'released')
+
+    def test_watchdog_deadline_is_bounded_even_when_cleanup_stalls(self):
+        script = ('import foreground_control as f,threading,time,sys; '
+                  'f.watchdog(int(sys.argv[1]),100,threading.Event(),lambda: time.sleep(5))')
+        started = time.monotonic()
+        worker = subprocess.run([sys.executable, '-c', script, str(os.getpid())],
+                                cwd=str(Path(control.__file__).parent),
+                                creationflags=subprocess.CREATE_NO_WINDOW, timeout=2)
+        self.assertEqual(worker.returncode, 124)
+        self.assertLess(time.monotonic() - started, 2)
 
     def test_indicator_failure_or_block_refusal_never_takes_focus(self):
         for failure in ('show', 'block'):

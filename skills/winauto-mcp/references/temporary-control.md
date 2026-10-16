@@ -138,10 +138,17 @@ allowed only as the last step; unlike `control_set`, capture is not required.
   cancellation skips cursor/focus restoration to avoid overriding human action.
   There is no renewable interactive lease. Ctrl+Alt+Del still opens Windows'
   secure desktop; the tool does not operate there.
+  Cleanup has a 250 ms grace bound so a stalled SendInput release cannot keep
+  hooks alive indefinitely. Exit removes hooks but does not prove key/button
+  release; unconfirmed release flags remain null.
 - `release_control()` hides attachment decorations; `release_keyboard()` is a
   compatibility no-op and `keyboard_status()` is passive. None cancels or reports
   the live gate of a running serialized foreground call. Use physical Escape
   for immediate human cancellation; the watchdog enforces the deadline.
+  `keyboard_status` additionally returns one passive `held_virtual_keys` sample
+  (numeric VK codes, no text/history). Acquisition refusals include the same
+  diagnostic. Async key state cannot prove human versus injected origin; do not
+  bypass the guard or use blanket key-up injection to clear an unknown key.
 - Final capture uses fresh visible client pixels before focus release, preserving
   transient suggestion/hover state. It refuses foreign occlusion and never reuses
   a stale image. Off-client popup pixels require separately attaching that popup.

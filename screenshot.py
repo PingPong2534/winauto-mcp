@@ -25,6 +25,32 @@ from overlay import hidden_for_capture
 PW_RENDERFULLCONTENT = 0x00000002
 
 
+def _native_window_rect(hwnd):
+    """Measure in the target's render context; restore our physical-pixel context.
+
+    A bitmap-virtualized legacy window can paint logical pixels into a physical
+    sized PrintWindow DC, returning success with scaled content and black padding.
+    Reject that path before allocating a DC; guarded screen capture stays aligned
+    with UIA without guessing content bounds or stretching app pixels.
+    """
+    user = ctypes.WinDLL('user32', use_last_error=True)
+    user.GetWindowDpiAwarenessContext.argtypes = [ctypes.c_void_p]
+    user.GetWindowDpiAwarenessContext.restype = ctypes.c_void_p
+    user.SetThreadDpiAwarenessContext.argtypes = [ctypes.c_void_p]
+    user.SetThreadDpiAwarenessContext.restype = ctypes.c_void_p
+    context = user.GetWindowDpiAwarenessContext(hwnd)
+    if not context:
+        return None
+    previous = user.SetThreadDpiAwarenessContext(context)
+    if not previous:
+        return None
+    try:
+        return win32gui.GetWindowRect(hwnd)
+    finally:
+        if not user.SetThreadDpiAwarenessContext(previous):
+            raise RuntimeError('could not restore capture thread DPI context')
+
+
 def _print_window(hwnd) -> Image.Image | None:
     """Ask the window to render itself into a bitmap, and crop out its client
     area. Returns None if it declines or hands back nothing usable.
@@ -39,6 +65,9 @@ def _print_window(hwnd) -> Image.Image | None:
     win_w, win_h = win_right - win_left, win_bottom - win_top
     if win_w <= 0 or win_h <= 0:
         return None
+    native_rect = _native_window_rect(hwnd)
+    if native_rect is None or (native_rect[2] - native_rect[0], native_rect[3] - native_rect[1]) != (win_w, win_h):
+        return None  # DPI-virtualized pixels cannot safely represent UIA coordinates.
 
     window_dc = win32gui.GetWindowDC(hwnd)
     if not window_dc:
@@ -80,6 +109,8 @@ def _print_window(hwnd) -> Image.Image | None:
     # client-relative, so trim the border and title bar off the same way the
     # screen-grab path does.
     if not win32gui.IsWindow(hwnd):
+        return None
+    if win32gui.GetWindowRect(hwnd) != (win_left, win_top, win_right, win_bottom):
         return None
     cl, ct, cr, cb = get_client_rect_screen(hwnd)
     crop = (cl - win_left, ct - win_top, cr - win_left, cb - win_top)

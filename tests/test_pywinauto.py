@@ -248,6 +248,40 @@ class BackgroundTests(unittest.TestCase):
         self.assertTrue(win32gui.IsWindowVisible(self.cover))
         self.assertNotIn("winauto test cover", [e["name"] for e in elements])
 
+    def test_observed_runtime_id_selects_unnamed_edit_and_remembers_it_under_cover(self):
+        elements = json.loads(server.get_elements())
+        edit = next(e for e in elements if e['automation_id'] == '101')
+        selected = json.loads(server.click_element(runtime_id=edit['runtime_id']))
+        self.assertIn('selected text target', selected['action'])
+        result = json.loads(server.type_text('identity ไทย', replace=True))
+        self.assertTrue(result['verified'])
+        self.assertEqual(json.loads(server.read_element(runtime_id=edit['runtime_id']))['value'], 'identity ไทย')
+        result = json.loads(server.type_text('direct identity', runtime_id=edit['runtime_id'], replace=True))
+        self.assertTrue(result['verified'])
+        self.assertEqual(self.text(), 'direct identity')
+
+    def test_runtime_id_preserves_disabled_readonly_and_foreign_window_refusals(self):
+        elements = {e['automation_id']: e for e in json.loads(server.get_elements())}
+        with self.assertRaisesRegex(ValueError, 'disabled'):
+            server.click_element(runtime_id=elements['205']['runtime_id'])
+        with self.assertRaisesRegex(ValueError, 'read-only'):
+            server.type_text('must not write', replace=True, runtime_id=elements['102']['runtime_id'])
+        with uia_inspect.com_session():
+            foreign = list(uia_inspect.runtime_id(uia_inspect.root_wrapper(self.cover)))
+        with self.assertRaisesRegex(ValueError, 'bound control'):
+            server.click_element(runtime_id=foreign)
+        self.assertEqual(win32gui.GetWindowText(self.window.controls[102]), 'readonly')
+
+    def test_runtime_id_disambiguates_identically_named_controls(self):
+        elements = json.loads(server.get_elements())
+        duplicates = [e for e in elements if e['name'] == 'Duplicate']
+        self.assertEqual(len(duplicates), 2)
+        with self.assertRaisesRegex(ValueError, 'ambiguous'):
+            server.read_element(name='Duplicate')
+        for element in duplicates:
+            state = json.loads(server.read_element(runtime_id=element['runtime_id']))
+            self.assertEqual(state['automation_id'], element['automation_id'])
+
     def test_control_step_capabilities_match_real_controls(self):
         elements = {e["automation_id"]: e for e in json.loads(server.get_elements())}
         self.assertEqual(elements["101"]["control_steps"], ["click", "type", "capture"])

@@ -77,7 +77,16 @@ def _find(hwnd, name=None, automation_id=None, selected=False, editable=False, t
     remembered = target_id
     if remembered is None and selected and name is None and automation_id is None:
         remembered = _targets.get(hwnd)
-    for wrapper in (candidates if candidates is not None else uia.walk(uia.root_wrapper(hwnd), strict=True, scope=scope)):
+    if remembered is not None:
+        if (not isinstance(remembered, (list, tuple)) or not remembered
+                or any(type(part) is not int for part in remembered)):
+            raise ValueError('runtime_id must be a nonempty array of integers from get_elements')
+        remembered = tuple(remembered)
+    # Runtime IDs are unique within the current desktop. Exact identity needs
+    # membership in this bounded window walk, not exhaustive name uniqueness.
+    # Unrelated depth/provider failures must not invalidate an observed ID.
+    for wrapper in (candidates if candidates is not None else uia.walk(
+            uia.root_wrapper(hwnd), strict=remembered is None, scope=scope)):
         info = wrapper.element_info
         if remembered is not None and uia.runtime_id(wrapper) != remembered:
             continue
@@ -87,13 +96,15 @@ def _find(hwnd, name=None, automation_id=None, selected=False, editable=False, t
             continue
         if editable and info.control_type not in ("Edit", "Document", "ComboBox"):
             continue
+        if remembered is not None:
+            return wrapper
         matches.append(wrapper)
     if needle is not None:
         exact = [w for w in matches if (w.element_info.name or "").casefold().strip() == needle]
         matches = exact or matches
     if not matches:
         if target_id is not None:
-            raise ValueError("the bound control disappeared; no replacement control was selected")
+            raise ValueError("the bound control disappeared or was not found within the inspection limits; no replacement control was selected")
         if remembered is not None:
             raise ValueError("the selected element disappeared; select it again or supply name/automation_id")
         raise ValueError("no matching element in the attached window; check get_elements")
@@ -198,11 +209,11 @@ def click_in_window(hwnd, client_x, client_y, button="left", double=False,
         return _activate(hwnd, _at_point(hwnd, client_x, client_y, interactive=True))
 
 
-def click_element(hwnd, name=None, automation_id=None, button="left", double=False, scope="window"):
+def click_element(hwnd, name=None, automation_id=None, button="left", double=False, scope="window", runtime_id=None):
     ensure_input_allowed(hwnd)
     _click_options(button, double)
     with _lock, background_action(hwnd), uia.com_session():
-        wrapper = _find(hwnd, name, automation_id, scope=scope)
+        wrapper = _find(hwnd, name, automation_id, scope=scope, target_id=runtime_id)
         desc = uia.describe(wrapper, hwnd)
         action = _activate(hwnd, wrapper)
         return {"action": action, "element": desc, "backend": "pywinauto-uia", "scope": scope}
@@ -231,18 +242,18 @@ def _type_into(hwnd, wrapper, text, replace=False):
             "backend": "pywinauto-uia"}
 
 
-def type_text(text, hwnd=None, name=None, automation_id=None, replace=False):
+def type_text(text, hwnd=None, name=None, automation_id=None, replace=False, runtime_id=None):
     if hwnd is None:
         raise ValueError("hwnd is required; background typing never uses the foreground window")
     ensure_input_allowed(hwnd)
     with _lock, background_action(hwnd), uia.com_session():
-        wrapper = _find(hwnd, name, automation_id, selected=True, editable=True)
+        wrapper = _find(hwnd, name, automation_id, selected=True, editable=True, target_id=runtime_id)
         return _type_into(hwnd, wrapper, text, replace)
 
 
-def read_element(hwnd, name=None, automation_id=None, scope="window"):
+def read_element(hwnd, name=None, automation_id=None, scope="window", runtime_id=None):
     with _lock, uia.com_session():
-        wrapper = _find(hwnd, name, automation_id, scope=scope)
+        wrapper = _find(hwnd, name, automation_id, scope=scope, target_id=runtime_id)
         return _read_from(hwnd, wrapper)
 
 

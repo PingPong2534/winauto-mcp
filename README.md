@@ -72,6 +72,23 @@ place the real caret or change Windows focus. `type_text` appends to the end
 by default; `replace=True` replaces the whole value. Text and numeric writes
 verify their value by reading it back. Duplicate names/IDs are refused.
 
+For unnamed or duplicate webpage controls, use the exact `runtime_id` returned
+by current `get_elements()`/`capture_screen()` inspection with `click_element`,
+`read_element` or `type_text`. Identity lookup stays inside the attached window
+and its depth/node bounds, but does not require an exhaustive name-uniqueness
+scan of unrelated deep branches. Missing identities refuse without selecting a
+replacement. Reinspect after navigation/replacement; runtime IDs can be reused.
+Coordinate clicks and name/automation-ID lookups retain strict traversal guards.
+
+`auto` capture checks the target's DPI render context before using PrintWindow.
+If native and physical window dimensions differ, it uses guarded visible pixels
+instead of returning a successful bitmap with scaled content and black padding.
+That fallback still refuses covered windows. A foreign WinAuto overlay can paint
+outline/highlight pixels and is treated as a cover; no cross-instance overlay is
+hidden or exempted by class name. For covered targets, `capture_region` with
+`capture_mode="auto"` can use PrintWindow only when that path is DPI compatible.
+See [issue review and verification](docs/issue-review-20261016.md).
+
 Checkboxes use TogglePattern, items/tabs use SelectionItemPattern, buttons use
 InvokePattern, expandable controls use ExpandCollapsePattern, text uses
 ValuePattern, sliders use RangeValuePattern, and scrolling uses ScrollPattern.

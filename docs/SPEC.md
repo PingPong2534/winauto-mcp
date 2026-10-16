@@ -80,6 +80,13 @@ UIAccess. An unknown integrity level does not itself refuse an action.
 | RangeValuePattern | Set finite in-range numeric value, read back |
 | ScrollPattern | Vertical small steps; search pointed element then ancestors |
 
+`click_element`, `read_element` and `type_text` accept a currently inspected
+`runtime_id`. Exact identity lookup stays within the attached window/scope and
+depth/node budget without requiring exhaustive name uniqueness. Missing IDs
+refuse without replacement; additional selectors must match. Runtime IDs may be
+reused over time, so callers reinspect after navigation or replacement. Coordinate
+and name/automation-ID lookup retain strict completeness and ambiguity checks.
+
 Coordinate clicks choose the smallest containing interactive UIA control;
 Text labels do not eclipse enclosing buttons. No Desktop.from_point is used.
 There is no SendInput, click_input, type_keys, set_focus or Win32 foreground
@@ -131,6 +138,9 @@ execute. `force` bypasses only stale image checking; `keep_cursor` and
 `stop_if_user_types` have no effect. `release_keyboard(enable_blocking=True)`
 cannot enable input blocking. Deprecated tool names remain registered so old
 clients receive a clear error instead of silently injecting input.
+`keyboard_status` provides one passive numeric `held_virtual_keys` sample with
+unknown physical/injected origin; it neither watches key events nor releases
+unknown keys. Foreground acquisition refusals provide the same diagnostic.
 
 Drag now requires explicit `allow_takeover=True` and a visible `reason`, either
 through `drag` or a foreground_steps drag. Duration 100..1500 ms, default 500;
@@ -139,6 +149,8 @@ run_steps still rejects drag. Tracked mouse buttons are released before restorin
 cursor/focus, even after Escape/failed motion. Watchdog cleanup attempts button-ups
 before exit. Report mouse_buttons_released is null after an unconfirmed worker
 exit; hard termination does not prove button release.
+Watchdog cleanup runs with a maximum 250 ms grace; a stalled release API cannot
+keep the watchdog's worker/hooks alive indefinitely.
 
 The initial coordinate click in a batch uses the caller's latest relevant
 view. After a script action mutates the UI, later predicted coordinates are
@@ -158,6 +170,9 @@ fresh-only crop and report-only runtime failures.
 PrintWindow supplies client-area pixels without activation. If unavailable,
 the screen fallback is allowed only when no visible window above overlaps the
 target; covered/minimized targets fail explicitly rather than being raised.
+Auto capture first rejects native/physical window dimension mismatches caused
+by DPI virtualization, avoiding a scaled/black-padded PrintWindow result.
+Foreign WinAuto overlays remain covers; only this server's decoration is hidden.
 Before/after frames are optional evidence: semantic UIA actions may succeed
 when pixel capture is unavailable. A stale guard has no image evidence to
 compare in that case.
