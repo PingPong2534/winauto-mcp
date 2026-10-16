@@ -579,9 +579,11 @@ def get_elements(scope: str = "window") -> str:
 
 
 @tool
-def read_element(name: str | None = None, automation_id: str | None = None, scope: str = "window") -> str:
-    """Read unique UIA state. scope=non_document excludes Document subtrees."""
-    return json.dumps(input_sim.read_element(_require_attached(), name, automation_id, scope),
+def read_element(name: str | None = None, automation_id: str | None = None, scope: str = "window",
+                 runtime_id: list[int] | None = None) -> str:
+    """Read unique UIA state. runtime_id uses an observed exact identity within
+    this window's bounded tree; scope=non_document excludes Document subtrees."""
+    return json.dumps(input_sim.read_element(_require_attached(), name, automation_id, scope, runtime_id),
                       ensure_ascii=False)
 
 
@@ -686,13 +688,17 @@ def click(
 
 @tool
 def click_element(name: str | None = None, button: str = "left",
-                  double: bool = False, automation_id: str | None = None, scope: str = "window") -> str:
+                  double: bool = False, automation_id: str | None = None, scope: str = "window",
+                  runtime_id: list[int] | None = None) -> str:
     """Activate one UIA element by unique name or automation_id.
     Names match exactly first, then by substring; ambiguity is refused.
     An edit becomes the logical text target without changing Windows focus.
     Right/double clicks are unsupported. scope=non_document excludes Document
-    roots/subtrees; uniqueness and tree limits still apply inside that scope."""
-    result = input_sim.click_element(_require_attached(), name, automation_id, button, double, scope)
+    roots/subtrees; uniqueness and tree limits still apply inside that scope.
+    runtime_id from get_elements targets that exact current identity, including
+    duplicate/unnamed webpage controls, without scanning for name uniqueness.
+    Identity lookup remains bounded to this attached window; missing IDs refuse."""
+    result = input_sim.click_element(_require_attached(), name, automation_id, button, double, scope, runtime_id)
     return json.dumps(result, ensure_ascii=False)
 
 
@@ -723,13 +729,15 @@ def wait_for(name: str, timeout: float = 10.0, interval: float = 0.5) -> str:
 
 @tool
 def type_text(text: str, name: str | None = None,
-              automation_id: str | None = None, replace: bool = False) -> str:
+              automation_id: str | None = None, replace: bool = False,
+              runtime_id: list[int] | None = None) -> str:
     """Write literal Unicode through ValuePattern, with verified readback.
     Appends to the END by default (not the physical caret); replace=True sets
     the whole value. Target by name/id, a logically selected edit, or the
-    only editable control. No global keyboard or focus is used."""
+    only editable control. runtime_id from get_elements selects an exact current
+    identity within this window's bounded tree. No global keyboard or focus is used."""
     result = input_sim.type_text(text, hwnd=_require_attached(), name=name,
-                                 automation_id=automation_id, replace=replace)
+                                 automation_id=automation_id, replace=replace, runtime_id=runtime_id)
     return json.dumps(result, ensure_ascii=False)
 
 
@@ -1067,12 +1075,15 @@ def keep_foreground(enabled: bool) -> str:
 
 @tool
 def keyboard_status() -> str:
-    """Report background mode. No global input is blocked or monitored."""
+    """Report background mode and one passive held-VK sample (no hooks/history).
+    Async state cannot distinguish physical keys from residual injected input."""
     return json.dumps({
         "backend": "pywinauto-uia", "blocking": False, "watching": False,
         "blocking_enabled": False, "lease_remaining_s": 0,
         "latched_off_by_user": False, "human_key_events": None,
         "seconds_since_human_key": None, "last_releases": [],
+        "held_virtual_keys": foreground_control.held_virtual_keys(),
+        "held_input_origin": "unknown; async state does not distinguish physical and injected input",
     })
 
 

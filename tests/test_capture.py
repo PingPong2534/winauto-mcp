@@ -19,6 +19,51 @@ from test_pywinauto import TestWindow
 
 
 class CaptureTests(unittest.TestCase):
+    def test_dpi_virtualized_printwindow_is_rejected_before_returning_padded_pixels(self):
+        src, mem, bmp = Mock(), Mock(), Mock()
+        src.CreateCompatibleDC.return_value = mem
+        bmp.GetInfo.return_value = {'bmWidth': 300, 'bmHeight': 150}
+        padded = Image.new('RGB', (300, 150), 'black')
+        padded.paste('white', (0, 0, 200, 100))
+        bmp.GetBitmapBits.return_value = padded.tobytes('raw', 'BGRX')
+        with contextlib.ExitStack() as stack:
+            for name, value in (('GetWindowRect', (0, 0, 300, 150)), ('GetWindowDC', 42), ('IsWindow', True)):
+                stack.enter_context(patch.object(screenshot.win32gui, name, return_value=value))
+            stack.enter_context(patch.object(screenshot, '_native_window_rect', return_value=(0, 0, 200, 100)))
+            stack.enter_context(patch.object(screenshot, 'get_client_rect_screen', return_value=(0, 0, 300, 150)))
+            stack.enter_context(patch.object(screenshot.win32ui, 'CreateDCFromHandle', return_value=src))
+            stack.enter_context(patch.object(screenshot.win32ui, 'CreateBitmap', return_value=bmp))
+            stack.enter_context(patch.object(screenshot.ctypes.windll.user32, 'PrintWindow', return_value=1))
+            stack.enter_context(patch.object(screenshot.win32gui, 'DeleteObject'))
+            stack.enter_context(patch.object(screenshot.win32gui, 'ReleaseDC'))
+            self.assertIsNone(screenshot._print_window(1))
+
+    def test_capture_dpi_context_restores_even_when_measurement_fails(self):
+        for failed in (False, True):
+            user = Mock()
+            user.GetWindowDpiAwarenessContext.return_value = 111
+            user.SetThreadDpiAwarenessContext.side_effect = [222, 111]
+            with patch.object(screenshot.ctypes, 'WinDLL', return_value=user), \
+                 patch.object(screenshot.win32gui, 'GetWindowRect', return_value=(0, 0, 200, 100),
+                              side_effect=ValueError('target closed') if failed else None):
+                if failed:
+                    with self.assertRaisesRegex(ValueError, 'target closed'):
+                        screenshot._native_window_rect(1)
+                else:
+                    self.assertEqual(screenshot._native_window_rect(1), (0, 0, 200, 100))
+            self.assertEqual([call.args[0] for call in user.SetThreadDpiAwarenessContext.call_args_list], [111, 222])
+
+    def test_foreign_winauto_overlay_is_not_an_occlusion_exception(self):
+        with contextlib.ExitStack() as stack:
+            for name, value in (('GetTopWindow', 2), ('IsWindowVisible', True), ('IsIconic', False),
+                                ('GetWindowRect', (0, 0, 100, 100)), ('GetWindow', 1),
+                                ('GetClassName', 'winauto_overlay_foreign_instance')):
+                stack.enter_context(patch.object(screenshot.win32gui, name, return_value=value))
+            stack.enter_context(patch.object(screenshot, '_cloaked', return_value=False))
+            stack.enter_context(patch('win32process.GetWindowThreadProcessId', return_value=(7, 8)))
+            with self.assertRaisesRegex(ValueError, 'covered.*window|another window covers'):
+                screenshot.ensure_uncovered(1, (0, 0, 100, 100))
+
     def test_native_repeated_printwindow_capture_does_not_leak_gdi_handles(self):
         window = TestWindow()
         user = ctypes.WinDLL('user32', use_last_error=True)
@@ -69,6 +114,7 @@ class CaptureTests(unittest.TestCase):
         mem.DeleteDC.side_effect = win32ui.error('DeleteDC failed')
         with contextlib.ExitStack() as stack:
             stack.enter_context(patch.object(screenshot.win32gui, 'GetWindowRect', return_value=(0, 0, 200, 100)))
+            stack.enter_context(patch.object(screenshot, '_native_window_rect', return_value=(0, 0, 200, 100)))
             stack.enter_context(patch.object(screenshot.win32gui, 'GetWindowDC', return_value=42))
             stack.enter_context(patch.object(screenshot.win32ui, 'CreateDCFromHandle', return_value=src))
             stack.enter_context(patch.object(screenshot.win32ui, 'CreateBitmap', return_value=bmp))

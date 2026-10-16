@@ -38,6 +38,11 @@ class TransportTests(unittest.TestCase):
                     for name in ('get_elements', 'click_element', 'read_element'):
                         tool = next(tool for tool in listing.tools if tool.name == name)
                         self.assertEqual(tool.input_schema['properties']['scope']['default'], 'window')
+                    for name in ('click_element', 'read_element', 'type_text'):
+                        tool = next(tool for tool in listing.tools if tool.name == name)
+                        variants = tool.input_schema['properties']['runtime_id']['anyOf']
+                        array = next(v for v in variants if v.get('type') == 'array')
+                        self.assertEqual(array['items']['type'], 'integer')
                     for name in ('screenshot', 'capture_screen', 'capture_region'):
                         tool = next(tool for tool in listing.tools if tool.name == name)
                         self.assertEqual(tool.input_schema['properties']['capture_mode']['default'], 'auto')
