@@ -1,4 +1,4 @@
 interface:
   display_name: "WinAuto MCP"
   short_description: "Windows UIA control and bounded foreground interactions"
-  default_prompt: "Use $winauto-mcp to inspect the Windows app, choose UIA or permitted bounded foreground actions, and verify the result."
+  default_prompt: "Use $winauto-mcp for native Windows operations or an evidenced browser fallback. For browser tasks, prefer a supported API and the AI provider's native browser/computer-use tool first; inspect current state and use guarded WinAuto only for the remaining unsupported step."

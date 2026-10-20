@@ -1,9 +1,17 @@
 ---
 name: winauto-mcp
-description: "Install, control and verify Windows apps through WinAuto MCP. Choose UIA state checks, guarded multi-control batches with Pillow/OpenCV, or explicitly permitted short foreground sequences for custom controls and focus-dependent interactions. Includes capture/cache, journal and partial-failure recovery. Requires the connected WinAuto MCP server."
+description: "Install, control and verify Windows apps through WinAuto MCP. Choose UIA state checks, guarded multi-control batches with Pillow/OpenCV, or explicitly permitted short foreground sequences for custom controls and focus-dependent interactions. Includes capture/cache, journal and partial-failure recovery. For browser tasks, prefer the AI provider's native browser/computer-use tools before WinAuto fallback. Requires the connected WinAuto MCP server."
 ---
 
 # WinAuto MCP
+
+## Browser routing
+
+- Prefer supported authenticated APIs or CLIs per operation. For remaining browser UI, first use the current AI provider's native Browser Use, Computer Use or equivalent supported browser-control tool. This applies across providers, including Codex and Claude; do not assume identical APIs or installed integrations.
+- Check the provider's live capabilities and current documentation. Prefer direct page/DOM/accessibility operations and its supported upload mechanism. Do not select WinAuto merely because it worked in a past browser session or because native-desktop control is unavailable.
+- Use WinAuto for a browser step only after observing provider-tool unavailability, an unsupported operation or a bounded failed attempt. Record the specific limitation, then apply this skill's guarded UIA/foreground rules to the unfinished step. Native Windows dialogs not exposed by the browser tool may need WinAuto.
+- Checkpoint forms, upload IDs and ambiguous submissions before handing over; release the prior controller at a safe boundary and inspect current state. Never operate the same browser concurrently or repeat a completed upload/submit to change tools.
+- Permission, security, CAPTCHA and input-safety refusals require their supported resolution or human handoff. A different controller must not bypass them. Provider browser availability does not grant permission for new external actions.
 
 ## Connection and scope
 
