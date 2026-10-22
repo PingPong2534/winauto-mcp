@@ -58,6 +58,9 @@ def walk(root, max_depth=MAX_DEPTH, max_nodes=MAX_NODES, strict=False, scope="wi
         yield wrapper
         try:
             children = wrapper.children()
+        except TypeError as exc:
+            raise RuntimeError('UIA provider returned invalid element metadata during enumeration; '
+                               'try scope=non_document for browser chrome; no input was sent') from exc
         except (comtypes.COMError, RuntimeError):
             if strict:
                 raise
@@ -110,8 +113,8 @@ def describe(wrapper, hwnd):
     ) if pattern(wrapper, iface) is not None]
     return {
         "name": info.name or "", "automation_id": info.automation_id or "",
-        "control_type": info.control_type + "Control",
-        "category": INTERACTIVE_TYPES.get(info.control_type, info.control_type),
+        "control_type": (info.control_type or "Unknown") + "Control",
+        "category": INTERACTIVE_TYPES.get(info.control_type, info.control_type or "Unknown"),
         "enabled": bool(wrapper.is_enabled()),
         "rect": [rect.left - left, rect.top - top, rect.right - left, rect.bottom - top],
         "runtime_id": list(runtime_id(wrapper)), "actions": actions,

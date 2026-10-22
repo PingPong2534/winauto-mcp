@@ -225,7 +225,7 @@ class ForegroundTests(unittest.TestCase):
         native.guard = Mock()
         native.user = Mock()
         native.user.MapVirtualKeyW.side_effect = lambda vk, mode: {13: 0x1C, 27: 0x01,
-            16: 0x2A, 17: 0x1D, 18: 0x38, 38: 0xE048}.get(vk, 0x1E)
+            16: 0x2A, 17: 0x1D, 18: 0x38, 38: 0xE048, 35: 0xE04F, 45: 0xE052}.get(vk, 0x1E)
         native.user.SendInput.side_effect = lambda count, events, size: count
         return native
 
@@ -243,7 +243,8 @@ class ForegroundTests(unittest.TestCase):
                               {'do': 'key', 'keys': ['escape'], 'hold_ms': 500}], 'test', 1000, True)
 
     def test_scan_code_down_interval_and_key_up_after_cancellation(self):
-        for key, scan, flags in (('enter', 0x1C, 8), ('escape', 1, 8), ('up', 0x48, 9)):
+        for key, scan, flags in (('enter', 0x1C, 8), ('escape', 1, 8), ('up', 0x48, 9),
+                                 ('end', 0x4F, 9), ('insert', 0x52, 9)):
             for cancelled in (False, True):
                 with self.subTest(key=key, cancelled=cancelled):
                     native = self.native_mouse()

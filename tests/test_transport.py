@@ -60,6 +60,11 @@ class TransportTests(unittest.TestCase):
                     self.assertTrue(result.is_error)
                     message = next(b.text for b in result.content if b.type == "text")
                     self.assertIn("no window attached", message)
+                    diagnostic = json.loads(message)
+                    self.assertFalse(diagnostic['ok'])
+                    self.assertEqual(diagnostic['tool'], 'type_text')
+                    self.assertEqual(diagnostic['error_type'], 'ValueError')
+                    self.assertEqual(result.structured_content['result'], message)
                     result = await session.call_tool("control_set", {
                         "automation_id": "101", "steps": [{"do": "capture"}],
                     })

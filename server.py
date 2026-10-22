@@ -44,6 +44,7 @@ import threading
 import time
 
 from mcp.server.mcpserver import Image, MCPServer
+from mcp.types import CallToolResult, TextContent
 
 import heap
 import control_sets
@@ -413,7 +414,29 @@ def journaled(fn):
 
 def tool(fn):
     """Register `fn` as an MCP tool, journaled."""
-    return mcp.tool()(journaled(fn))
+    logged = journaled(fn)
+
+    @functools.wraps(fn)
+    def transport(*args, **kwargs):
+        try:
+            return logged(*args, **kwargs)
+        except Exception as error:
+            # Explicit MCP error results survive hosts that mask raised exceptions.
+            diagnostic = {"ok": False, "tool": fn.__name__,
+                          "error_type": getattr(error, "cause_type", type(error).__name__),
+                          "error": str(error), "phase": getattr(error, "phase", "tool_execution"),
+                          "mutation_outcome": getattr(error, "mutation_outcome", "unknown; inspect state before retrying")}
+            for field in ("window_state_before", "window_state_after"):
+                if hasattr(error, field):
+                    diagnostic[field] = getattr(error, field)
+            message = json.dumps(diagnostic, ensure_ascii=False)
+            # Keep the existing string-output schema, including on failures.
+            structured = {"result": message} if inspect.signature(fn).return_annotation is str else None
+            return CallToolResult(is_error=True, structured_content=structured,
+                                  content=[TextContent(type="text", text=message)])
+
+    mcp.tool()(transport)
+    return logged
 
 
 @tool
@@ -624,6 +647,9 @@ def foreground_steps(steps: list[dict], reason: str, timeout_ms: int = 3000,
     type(text,replace=False), key(keys=[lowercase names],hold_ms=80), wait(ms), and optional
     final capture(region=[x1,y1,x2,y2]). Coordinates remain client-relative;
     pointer targets must belong to the attached window or its owned popup.
+    Supported key names: a-z, 0-9, ctrl, shift, alt, enter, tab, escape, up,
+    down, left, right, home, end, insert, backspace, delete. Shift+Insert uses
+    keys=["shift","insert"]; app paste behavior still needs independent verification.
     timeout_ms=1000..8000 includes announcement, actions and cleanup; no renewal.
     Orange screen edges announce before a temporary keyboard/mouse hook gate.
     Physical Escape cancels and releases the gate. Focus stays through
@@ -697,7 +723,10 @@ def click_element(name: str | None = None, button: str = "left",
     roots/subtrees; uniqueness and tree limits still apply inside that scope.
     runtime_id from get_elements targets that exact current identity, including
     duplicate/unnamed webpage controls, without scanning for name uniqueness.
-    Identity lookup remains bounded to this attached window; missing IDs refuse."""
+    Identity lookup remains bounded to this attached window; missing IDs refuse.
+    Reports before/after foreground HWND and target minimized state, plus
+    foreground_changed. These are observations, not a provider no-focus guarantee.
+    Errors report phase and mutation uncertainty; inspect before retrying."""
     result = input_sim.click_element(_require_attached(), name, automation_id, button, double, scope, runtime_id)
     return json.dumps(result, ensure_ascii=False)
 
@@ -735,7 +764,10 @@ def type_text(text: str, name: str | None = None,
     Appends to the END by default (not the physical caret); replace=True sets
     the whole value. Target by name/id, a logically selected edit, or the
     only editable control. runtime_id from get_elements selects an exact current
-    identity within this window's bounded tree. No global keyboard or focus is used."""
+    identity within this window's bounded tree. Readback polls for up to 300 ms
+    without repeating the write. A minimized provider may remain stale: inspect
+    with read_element before retrying, and leave restoration to the user in a
+    strict background workflow. No global keyboard or focus is used."""
     result = input_sim.type_text(text, hwnd=_require_attached(), name=name,
                                  automation_id=automation_id, replace=replace, runtime_id=runtime_id)
     return json.dumps(result, ensure_ascii=False)

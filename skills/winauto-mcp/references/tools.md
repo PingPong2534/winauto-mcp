@@ -5,6 +5,10 @@ tool names; resolve the client's namespace. Signatures show defaults, not
 executable client functions. Omitted selectors default to `None`.
 Use current app observations for handles, IDs and coordinates.
 
+Tool failures use MCP `isError=true` with JSON text containing `error_type`,
+`error`, `phase`, and `mutation_outcome`. A tool error can follow a mutation;
+inspect the target before retrying. Unknown outcomes never mean nothing happened.
+
 ## Attachment
 
 ### `list_windows`
@@ -116,6 +120,12 @@ controls ExpandCollapsePattern. Read state before toggling/expanding; an action
 may reverse the current state. Edit/Document with ValuePattern select a logical
 text target without changing the caret. Right/double clicks are refused.
 
+`click_element` also reports `window_state_before`, `window_state_after` (foreground
+HWND and target minimized state), and `foreground_changed`. Samples describe
+observed state, not causality or a no-focus guarantee. A provider may open a save
+dialog or activate a child window. Failed invocation reports an unknown mutation
+outcome with the available state samples; never replay it without inspection.
+
 ### `click`
 
 `click(x,y,button="left",double=False,modifiers=None,force=False,keep_cursor=False)`
@@ -135,6 +145,9 @@ value. It does not send Enter/Tab or shortcut syntax. Explicit selectors are
 preferred. Without one, it uses a logically selected control or requires exactly
 one Edit/Document/ComboBox candidate. Disabled/read-only fields refuse writes.
 A readback error can occur after a write; inspect state before repeating it.
+Readback polls for up to 300 ms without repeating the write. A minimized provider
+may remain stale until the user restores it. Re-read the same current runtime ID;
+do not restore automatically in a background-only task or replay an append.
 
 ### `set_value`
 
@@ -357,6 +370,9 @@ Allow 1..20 steps: click(x,y,button="left"|"right",modifiers=[]),
 drag(x1,y1,x2,y2,button="left"|"right",duration_ms=500,modifiers=[]), hover(x,y,dwell_ms=500),
 scroll(x,y,clicks), type(text,replace=False), key(keys=[...],hold_ms=80), wait(ms), and one
 optional final capture(region=[x1,y1,x2,y2]). Step objects use the `do` field.
+Supported key names: a-z, 0-9, ctrl, shift, alt, enter, tab, escape, up, down,
+left, right, home, end, insert, backspace, delete. Shift+Insert is
+`{"do":"key","keys":["shift","insert"]}`. Delivery does not prove paste/caret outcome.
 Coordinates are client-relative; pointer points must hit the target or owned
 popup. Capture regions must be wholly inside the client. Positive scroll clicks
 send upward wheel notches; negative scrolls downward, as with UIA scroll.

@@ -22,7 +22,7 @@ MAX_TIMEOUT_MS = 8000
 CLEANUP_TIMEOUT_S = 0.25
 KEYS = {'enter': 0x0D, 'tab': 0x09, 'escape': 0x1B, 'up': 0x26,
         'down': 0x28, 'left': 0x25, 'right': 0x27, 'home': 0x24,
-        'end': 0x23, 'backspace': 0x08, 'delete': 0x2E,
+        'end': 0x23, 'insert': 0x2D, 'backspace': 0x08, 'delete': 0x2E,
         'ctrl': 0x11, 'shift': 0x10, 'alt': 0x12}
 KEYS.update({chr(n): n - 32 for n in range(ord('a'), ord('z') + 1)})
 KEYS.update({str(n): ord(str(n)) for n in range(10)})
