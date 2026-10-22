@@ -43,7 +43,8 @@ def last_input_tick():
 class TestWindow:
     """Normally activatable controls shown without activation or cursor movement."""
 
-    def __init__(self):
+    def __init__(self, auto_scroll=False):
+        self.auto_scroll = auto_scroll
         self.ready = threading.Event()
         self.done = threading.Event()
         self.hwnd = None
@@ -89,7 +90,7 @@ class TestWindow:
                 win32con.WS_OVERLAPPEDWINDOW, 200, 200, 740, 560, 0, 0, 0, None,
             )
             controls = [
-                (101, "EDIT", "", win32con.WS_BORDER, 10, 20, 280, 30),
+                (101, "EDIT", "", win32con.WS_BORDER | (win32con.ES_AUTOHSCROLL if self.auto_scroll else 0), 10, 20, 280, 30),
                 (102, "EDIT", "readonly", win32con.ES_READONLY, 10, 60, 280, 30),
                 (201, "BUTTON", "Run", win32con.BS_PUSHBUTTON, 10, 105, 100, 30),
                 (202, "BUTTON", "Enabled", win32con.BS_AUTOCHECKBOX, 10, 150, 140, 30),

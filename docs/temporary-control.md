@@ -31,12 +31,12 @@ and [skill workflow](../skills/winauto-mcp/references/temporary-control.md).
    and remains independent of native action/capture calls.
 2. Show orange edges on all monitors, plus reason and Escape reminder on the
    target monitor. Announce for 400 ms before acquiring the input gate.
-3. Refuse a held human key/button. Install short-lived WH_KEYBOARD_LL and
+3. Refuse any held key/button with unknown origin. Install short-lived WH_KEYBOARD_LL and
    WH_MOUSE_LL hooks on a dedicated message-pump thread. Suppress human/foreign
    injected input; pass only this worker's tagged events. Physical Escape
    cancels and releases the gate without restoring focus/cursor over human action.
-4. Request activation with SetForegroundWindow, then native UIA SetFocus if
-   necessary. Verify the actual foreground, target PID/liveness/integrity,
+4. Probe responsiveness and request native SetForegroundWindow once. Do not use
+   an unbounded UIA SetFocus fallback. Verify actual foreground, target PID/liveness/integrity,
    keyboard focus and pointed window ownership before input. No Alt workaround,
    AttachThreadInput, indefinite foreground loop or changed system setting.
 5. Keep focus across the short batch and final fresh visible-client capture.
@@ -62,9 +62,12 @@ does not use BlockInput or automatically elevate. Ctrl+Alt+Del remains Windows'
 secure-desktop action; the tool does not operate there.
 
 [SetForegroundWindow](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setforegroundwindow)
-can be denied. Native UIA SetFocus is also provider-dependent; if neither
-establishes the attached foreground family, abort. A bounded WM_NULL message
-waits up to 200 ms for asynchronous cross-thread activation acknowledgement;
+can be denied. Probe the target's responsiveness with WM_NULL (200 ms), request
+native foreground once, and acknowledge with another bounded WM_NULL. Denial or
+failure aborts before input. Do not call provider-dependent UIA SetFocus while
+the gate is held: it has no bounded completion contract. Native focus/cursor
+calls use ctypes WinDLL, allowing the Python hook thread to keep servicing input.
+Restoration probes the previous window for 100 ms and skips unresponsive windows;
 it never retries an activation request after lost focus. See Microsoft's
 [activation timing explanation](https://devblogs.microsoft.com/oldnewthing/20161118-00/?p=94745/).
 Lost-focus diagnostics identify HWND/PID/class without window titles. SendInput remains subject
@@ -86,10 +89,29 @@ Tracked button-ups precede cursor/focus restoration on normal/error cleanup;
 Escape/lost-focus cleanup may emit only those ups without ordinary input guards.
 The watchdog attempts the same release before exit. Forced kill or native input
 failure may leave release unconfirmed; inspect `mouse_buttons_released` (null
-unless a durable released report already confirms cleanup), not process termination alone.
+unless a durable cleanup checkpoint already acknowledges those ups), not process termination alone.
 `worker_exit_phase` records the last checkpoint and `release_confirmed` preserves
 acknowledged release even if post-release COM cleanup subsequently stalls.
 Diagnostic checkpoint write failures cannot prevent key/button/gate release.
+
+The hook pump waits for native messages instead of sleeping after every pump;
+each tagged event wakes it immediately. A 50 ms idle timeout preserves health
+checks and bounded shutdown. A wait failure removes both hooks and refuses more
+input. The hard watchdog still covers a stuck native call.
+
+Action/keyboard checks stop 500 ms before the original worker deadline to reserve
+cleanup time. Unicode text uses chunks of at most four Python characters, keeping
+surrogates and down/up pairs together, and always releases its owned possible
+downs on exit. Cleanup refuses to race an in-flight SendInput call; such release
+remains unconfirmed instead of claiming successful recovery. Never release an
+unknown async VK (including 231) or replay a partial append.
+
+`native_phase` and `native_elapsed_ms` identify native probe/request/acknowledgement
+and typing checkpoints. `failure_phase`/`failure_native_phase` retain the original
+failure even after restoration changes the current phase. Cooperative expiry
+reports `timed_out=true`, `cooperative_timeout=true`; `utf16_units_dispatched` is
+injection progress, not application readback. A restoring-stage hard exit retains
+durable owned key/button acknowledgements but does not confirm gate/focus release.
 
 Click/drag steps accept distinct ctrl/shift/alt modifiers held through button-up.
 Key steps use scan-code injection and a separate down interval (`hold_ms=80`,

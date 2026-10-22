@@ -91,7 +91,9 @@ Coordinate clicks choose the smallest containing interactive UIA control;
 Text labels do not eclipse enclosing buttons. No Desktop.from_point is used.
 There is no SendInput, click_input, type_keys, set_focus or Win32 foreground
 operation in background control paths. The separate foreground_steps tool
-explicitly uses input hooks/SendInput/SetForegroundWindow/native UIA SetFocus in a bounded worker.
+explicitly uses input hooks/SendInput/native SetForegroundWindow in a bounded worker.
+It probes responsiveness and reserves cleanup time; no unbounded UIA focus fallback
+runs while the input gate is held.
 See [temporary-control.md](temporary-control.md) for that contract. UIA provider behavior remains owned by
 the target application and is not a universal guarantee of background access.
 

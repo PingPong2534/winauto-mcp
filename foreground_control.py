@@ -20,6 +20,7 @@ import time
 
 MAX_TIMEOUT_MS = 8000
 CLEANUP_TIMEOUT_S = 0.25
+CLEANUP_RESERVE_S = 0.5
 KEYS = {'enter': 0x0D, 'tab': 0x09, 'escape': 0x1B, 'up': 0x26,
         'down': 0x28, 'left': 0x25, 'right': 0x27, 'home': 0x24,
         'end': 0x23, 'insert': 0x2D, 'backspace': 0x08, 'delete': 0x2E,
@@ -41,7 +42,7 @@ def validate(steps, reason, timeout_ms, allow_takeover):
                'drag': ({'x1', 'y1', 'x2', 'y2'}, {'button', 'duration_ms', 'modifiers'}),
                'scroll': ({'x', 'y', 'clicks'}, set()), 'type': ({'text'}, {'replace'}),
                'key': ({'keys'}, {'hold_ms'}), 'wait': ({'ms'}, set()), 'capture': (set(), {'region'})}
-    requested_ms = 400  # visible announcement before any input is blocked
+    requested_ms = 400 + round(CLEANUP_RESERVE_S * 1000)  # announcement and cleanup inside the lease
     for i, step in enumerate(steps):
         if not isinstance(step, dict) or step.get('do') not in schemas:
             raise ValueError(f'step {i}: unsupported step')
@@ -151,6 +152,8 @@ def worker_exit_report(report, returncode):
     """Preserve durable cleanup acknowledgements if only post-release work died."""
     confirmed = (report.get('phase') == 'released' and report.get('input_blocked') is False
                  and report.get('keys_released') is True and report.get('mouse_buttons_released') is True)
+    input_acknowledged = report.get('phase') in ('restoring', 'unblocking', 'closing_indicator',
+                                                'released', 'release_failed')
     report.update(ok=False, timed_out=returncode == 124, worker_returncode=returncode,
                   worker_exit_phase=report.get('phase', 'initializing'),
                   release_confirmed=confirmed, input_released_by_worker_exit=not confirmed,
@@ -160,8 +163,11 @@ def worker_exit_report(report, returncode):
                                             else 'unknown; inspect state before retrying'))
     report.update(input_blocked=False, phase='worker_exited')
     if not confirmed:
-        report['mouse_buttons_released'] = None
-        report['keys_released'] = None
+        # A restoring checkpoint already durably acknowledges owned key/button
+        # release. Gate/focus release remains a separate, unconfirmed outcome.
+        for field in ('mouse_buttons_released', 'keys_released'):
+            if not input_acknowledged or report.get(field) is not True:
+                report[field] = None
     return report
 
 
@@ -233,6 +239,10 @@ class NativeInput:
         self.user.MapVirtualKeyW.restype = wt.UINT
         self.user.GetGUIThreadInfo.argtypes = [wt.DWORD, ctypes.POINTER(_GuiThreadInfo)]
         self.user.GetGUIThreadInfo.restype = wt.BOOL
+        self.user.SetForegroundWindow.argtypes = [wt.HWND]
+        self.user.SetForegroundWindow.restype = wt.BOOL
+        self.user.SetCursorPos.argtypes = [ctypes.c_int, ctypes.c_int]
+        self.user.SetCursorPos.restype = wt.BOOL
         self.previous = self.gui.GetForegroundWindow()
         import win32api
         self.api = win32api
@@ -253,6 +263,8 @@ class NativeInput:
         return False
 
     def guard(self):
+        if time.monotonic() >= getattr(self, 'action_deadline', float('inf')):
+            raise TimeoutError('action deadline reached; cleanup reserve retained; inspect partial state before retrying')
         if self.gate:
             self.gate.check()
         if not self.gui.IsWindow(self.hwnd) or self.process.GetWindowThreadProcessId(self.hwnd)[1] != self.pid:
@@ -288,19 +300,23 @@ class NativeInput:
             raise RuntimeError('target must be visible and not minimized')
         self.windows.ensure_input_allowed(self.hwnd)
         if not self.belongs(self.gui.GetForegroundWindow()):
-            try:
-                self.gui.SetForegroundWindow(self.hwnd)
-                self.wait_activation()
-            except Exception:
-                pass
-        if not self.belongs(self.gui.GetForegroundWindow()):
-            # UIA's native SetFocus is a legitimate accessibility operation;
-            # bypass pywinauto's wrapper, which may use cursor/Alt workarounds.
-            import uia_inspect
-            with uia_inspect.com_session():
-                uia_inspect.root_wrapper(self.hwnd).element_info.element.SetFocus()
+            self.checkpoint('activation_probe')
+            self.wait_activation()  # refuse a hung target before requesting focus
+            self.checkpoint('activation_request')
+            accepted = self.user.SetForegroundWindow(self.hwnd)
+            self.checkpoint('activation_acknowledgement')
             self.wait_activation()
+            if not accepted and not self.belongs(self.gui.GetForegroundWindow()):
+                raise RuntimeError('native foreground request denied; no input dispatched; no UIA focus fallback')
+        self.checkpoint('activation_verification')
         self.guard()  # SetForegroundWindow can be denied; never inject into the old app
+
+    def checkpoint(self, detail, **fields):
+        if detail.startswith('activation_') and time.monotonic() >= getattr(self, 'action_deadline', float('inf')):
+            raise TimeoutError('activation deadline reached; cleanup reserve retained; no input dispatched')
+        callback = getattr(self, 'progress', None)
+        if callback is not None:
+            callback(detail, fields)
 
     def wait_activation(self):
         # Cross-thread SetForegroundWindow activation is asynchronous. Wait only
@@ -341,7 +357,8 @@ class NativeInput:
             else:
                 event.mi.dwExtraInfo = self.tag
         array = (_Input * len(events))(*events)
-        if self.user.SendInput(len(array), array, ctypes.sizeof(_Input)) != len(array):
+        accepted = self.user.SendInput(len(array), array, ctypes.sizeof(_Input))
+        if accepted != len(array):
             raise RuntimeError('SendInput did not accept every event; state may be partial')
 
     def _key_event(self, key, up=False):
@@ -389,6 +406,8 @@ class NativeInput:
         if stop:
             self.stopping = True
         acquired = self.dispatch_lock.acquire(timeout=0.1)
+        if not acquired:
+            raise RuntimeError('native input dispatch is still in flight; key release unconfirmed')
         try:
             held = list(self.held_keys)
             if held:
@@ -410,15 +429,24 @@ class NativeInput:
         self.keyboard_guard()
         if replace:
             self.key(['ctrl', 'a'])
-        encoded = text.encode('utf-16-le')
-        # Recheck the foreground between small chunks, never send a long unguarded stream.
-        for pos in range(0, len(encoded), 64):
-            events = []
-            for i in range(pos, min(pos + 64, len(encoded)), 2):
-                unit = int.from_bytes(encoded[i:i + 2], 'little')
-                events.extend((_Input(type=1, ki=_Keyboard(wScan=unit, dwFlags=4)),
-                               _Input(type=1, ki=_Keyboard(wScan=unit, dwFlags=6))))
-            self.send(events)
+        units = 0
+        try:
+            # Small scalar-aligned chunks keep surrogate/down-up pairs together
+            # and leave frequent ownership/deadline checks without per-key I/O.
+            for position in range(0, len(text), 4):
+                self.keyboard_guard()
+                encoded = text[position:position + 4].encode('utf-16-le')
+                events = []
+                for i in range(0, len(encoded), 2):
+                    unit = int.from_bytes(encoded[i:i + 2], 'little')
+                    events.extend((_Input(type=1, ki=_Keyboard(wScan=unit, dwFlags=4)),
+                                   _Input(type=1, ki=_Keyboard(wScan=unit, dwFlags=6))))
+                self.send(events)
+                units += len(encoded) // 2
+                self.checkpoint('typing', utf16_units_dispatched=units,
+                                text_delivery='injected; target acceptance unverified')
+        finally:
+            self.release_keys()
 
     def keyboard_guard(self):
         self.guard()
@@ -464,6 +492,8 @@ class NativeInput:
         # Normal dispatch cannot race a terminal release. If a native call is
         # stuck, the watchdog still attempts button-ups before terminating.
         acquired = self.dispatch_lock.acquire(timeout=0.1)
+        if not acquired:
+            raise RuntimeError('native input dispatch is still in flight; mouse release unconfirmed')
         try:
             held = self.held_mouse
             events = [_Input(type=0, mi=_Mouse(dwFlags=up))
@@ -496,22 +526,24 @@ class NativeInput:
         # Restore before unblocking, so cleanup cannot override a subsequent human switch.
         if (self.gate and self.gate.cancelled.is_set()) or not self.belongs(self.gui.GetForegroundWindow()):
             return {'focus_restored': False, 'cursor_restored': False}
-        self.api.SetCursorPos(self.cursor)
+        if not self.user.SetCursorPos(*self.cursor):
+            return {'focus_restored': False, 'cursor_restored': False,
+                    'restore_error': 'native cursor restoration failed'}
         restored = self.previous == self.gui.GetForegroundWindow()
         if self.previous and self.gui.IsWindow(self.previous) and not restored:
             try:
-                self.gui.SetForegroundWindow(self.previous)
+                self.checkpoint('restoration_probe')
+                self.gui.SendMessageTimeout(self.previous, 0, 0, 0, 2, 100)
+                if not self.belongs(self.gui.GetForegroundWindow()):
+                    return {'focus_restored': False, 'cursor_restored': self.api.GetCursorPos() == self.cursor,
+                            'restore_error': 'foreground changed during restoration probe; no focus request sent'}
+                self.checkpoint('restoration_request')
+                self.user.SetForegroundWindow(self.previous)
+                self.gui.SendMessageTimeout(self.previous, 0, 0, 0, 2, 100)
                 restored = self.gui.GetForegroundWindow() == self.previous
-            except Exception:
-                restored = False
-            if not restored:
-                try:
-                    import uia_inspect
-                    with uia_inspect.com_session():
-                        uia_inspect.root_wrapper(self.previous).element_info.element.SetFocus()
-                    restored = self.gui.GetForegroundWindow() == self.previous
-                except Exception:
-                    restored = False
+            except Exception as exc:
+                return {'focus_restored': False, 'cursor_restored': self.api.GetCursorPos() == self.cursor,
+                        'restore_error': str(exc)}
         return {'focus_restored': restored, 'cursor_restored': self.api.GetCursorPos() == self.cursor}
 
 
@@ -522,6 +554,15 @@ def execute(request, native, indicator, publish):
               'input_blocked': False, 'input_gate': 'low_level_hooks', 'cancel_key': 'Escape'}
     locked = False
     locked_at = None
+    started = time.monotonic()
+    native.action_deadline = request.get('deadline', time.monotonic() + request['timeout_ms'] / 1000) - CLEANUP_RESERVE_S
+    def progress(detail, fields):
+        report.update(native_phase=detail, native_elapsed_ms=round((time.monotonic() - started) * 1000), **fields)
+        try:
+            publish(report)
+        except Exception:
+            pass
+    native.progress = progress
     def cleanup_progress(phase):
         report['phase'] = phase
         try:
@@ -551,6 +592,7 @@ def execute(request, native, indicator, publish):
         indicator.show('กำลังควบคุมชั่วคราว')
         for i, step in enumerate(request['steps']):
             report['stopped_at_step'] = i
+            report['native_phase'] = 'step_' + step['do']
             publish(report)  # crash while executing this step has an explicitly unknown outcome
             native.guard()
             kind = step['do']
@@ -585,6 +627,10 @@ def execute(request, native, indicator, publish):
         report.pop('stopped_at_step', None)
     except Exception as exc:
         report['error'] = str(exc)
+        report['failure_phase'] = report['phase']
+        report['failure_native_phase'] = report.get('native_phase')
+        if isinstance(exc, TimeoutError):
+            report.update(timed_out=True, cooperative_timeout=True)
         if isinstance(exc, HeldInputError):
             report['held_virtual_keys'] = exc.keys
             report['held_input_origin'] = 'unknown; async state does not distinguish physical and injected input'
@@ -617,6 +663,8 @@ def execute(request, native, indicator, publish):
         cleanup_progress('closing_indicator')
         indicator.close()
         report['phase'] = 'released' if not report['input_blocked'] else 'release_failed'
+        report['release_confirmed'] = (report['phase'] == 'released' and report.get('keys_released') is True
+                                       and report.get('mouse_buttons_released') is True)
         publish(report)
     return report
 
@@ -662,6 +710,7 @@ def worker():
     ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
     request = json.loads(sys.stdin.buffer.read().decode('utf-8'))
     validate(request['steps'], request['reason'], request['timeout_ms'], True)
+    request['deadline'] = time.monotonic() + request['timeout_ms'] / 1000
     done = threading.Event()
     native = None
     def cleanup():
@@ -673,6 +722,7 @@ def worker():
     from takeover_indicator import ScreenIndicator
     native = NativeInput(request['hwnd'], request['pid'])
     indicator = ScreenIndicator(request['hwnd'], request['reason'], request['timeout_ms'])
+    indicator.deadline = request['deadline']
     try:
         with worker_apartment():
             report = execute(request, native, indicator,

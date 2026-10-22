@@ -123,6 +123,7 @@ class ForegroundTests(unittest.TestCase):
         native = object.__new__(control.NativeInput)
         native.hwnd, native.pid = 123, 456
         native.gui, native.process, native.windows = Mock(), Mock(), Mock()
+        native.user = Mock()
         native.gui.IsWindow.return_value = True
         native.gui.IsIconic.return_value = False
         native.gui.IsWindowVisible.return_value = True
@@ -130,11 +131,12 @@ class ForegroundTests(unittest.TestCase):
         foreground = [999]
         native.gui.GetForegroundWindow.side_effect = lambda: foreground[0]
         native.belongs = lambda hwnd: hwnd == 123
-        native.gui.SendMessageTimeout.side_effect = lambda *args: foreground.__setitem__(0, 123)
+        native.user.SetForegroundWindow.side_effect = lambda *args: foreground.__setitem__(0, 123) or True
         native.guard = Mock()
         native.activate()
-        native.gui.SetForegroundWindow.assert_called_once_with(123)
-        native.gui.SendMessageTimeout.assert_called_once_with(123, 0, 0, 0, 2, 200)
+        native.user.SetForegroundWindow.assert_called_once_with(123)
+        native.gui.SetForegroundWindow.assert_not_called()
+        self.assertEqual(native.gui.SendMessageTimeout.call_count, 2)
         native.guard.assert_called_once()
 
     def test_lost_foreground_diagnostic_omits_title_and_stops_input(self):
@@ -167,8 +169,9 @@ class ForegroundTests(unittest.TestCase):
                     self.assertEqual(report['worker_exit_phase'], phase)
                     self.assertEqual(report['release_confirmed'], confirmed)
                     self.assertEqual(report['input_released_by_worker_exit'], not confirmed)
-                    self.assertIs(report['keys_released'], True if confirmed else None)
-                    self.assertIs(report['mouse_buttons_released'], True if confirmed else None)
+                    input_acknowledged = phase in ('restoring', 'released')
+                    self.assertIs(report['keys_released'], True if input_acknowledged else None)
+                    self.assertIs(report['mouse_buttons_released'], True if input_acknowledged else None)
                     self.assertTrue(report['timed_out'])
 
     def test_cleanup_phase_journal_failure_cannot_prevent_input_release(self):
@@ -297,7 +300,7 @@ class ForegroundTests(unittest.TestCase):
 
     def test_partial_key_dispatch_and_watchdog_cleanup_release_all_possible_downs(self):
         native = self.native_mouse()
-        native.user.SendInput.side_effect = [1, 2]  # only first of two downs accepted
+        native.user.SendInput.side_effect = [1, 2]  # a short send leaves both downs possible
         with self.assertRaisesRegex(RuntimeError, 'partial'):
             native.send([native._key_event('ctrl'), native._key_event('shift')])
         self.assertEqual(len(native.held_keys), 2)
@@ -510,8 +513,11 @@ class ForegroundTests(unittest.TestCase):
         native = object.__new__(control.NativeInput)
         native.send = Mock()
         native.keyboard_guard = Mock()
+        native.release_keys = Mock()
         native.text('ไทย🙂', False)
-        events = native.send.call_args.args[0]
+        events = [event for call in native.send.call_args_list for event in call.args[0]]
+        self.assertEqual(native.send.call_count, 1)
+        native.release_keys.assert_called_once()
         self.assertEqual(len(events), 10)  # three Thai units + surrogate pair, down/up each
         units = [e.ki.wScan for e in events[::2]]
         encoded = b''.join(n.to_bytes(2, 'little') for n in units)

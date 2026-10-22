@@ -194,10 +194,13 @@ the actual caret/selection, not the logical UIA target. Capture is fresh visible
 client pixels before focus release. A blocked/hung worker may leave focus or
 cursor changed even though its input gate is released. The gate uses dedicated
 low-level keyboard/mouse hooks, avoiding this host's BlockInput permission
-failure. Activation uses SetForegroundWindow/native UIA SetFocus with verification;
+failure. Activation probes responsiveness and uses native SetForegroundWindow
+with verification; no unbounded UIA focus call runs under the input gate.
 installation never elevates automatically.
 See [temporary-control usage](skills/winauto-mcp/references/temporary-control.md)
 and [research/design](docs/temporary-control.md).
+See the [#21/#23/#27 follow-up](docs/foreground-timeout-fixes-20261022.md) for
+event-driven hook dispatch, the 500 ms cleanup reserve and native recovery proof.
 
 ## Other tools
 
