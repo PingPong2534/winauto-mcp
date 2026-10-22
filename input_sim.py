@@ -5,6 +5,8 @@ Coordinates resolve against the attached window's own tree even if covered.
 """
 import math
 import threading
+import time
+import win32gui
 import uia_inspect as uia
 from window_manager import background_action, ensure_input_allowed, get_client_size, get_client_rect_screen
 
@@ -42,6 +44,24 @@ def _show_interaction(hwnd, rect):
 
 class UnsupportedAction(ValueError):
     """The action needs real input or an unavailable UIA pattern."""
+
+
+class ActionFailure(RuntimeError):
+    """Mutation-aware diagnostics without control contents or automatic retries."""
+
+    def __init__(self, cause, phase, mutation_outcome):
+        super().__init__(str(cause))
+        self.phase = phase
+        self.mutation_outcome = mutation_outcome
+        self.cause_type = type(cause).__name__
+
+
+def _window_state(hwnd):
+    try:
+        return {"foreground_hwnd": win32gui.GetForegroundWindow(),
+                "target_minimized": bool(win32gui.IsIconic(hwnd))}
+    except Exception:
+        return {"foreground_hwnd": None, "target_minimized": None}
 
 
 def unsupported(action):
@@ -210,13 +230,31 @@ def click_in_window(hwnd, client_x, client_y, button="left", double=False,
 
 
 def click_element(hwnd, name=None, automation_id=None, button="left", double=False, scope="window", runtime_id=None):
-    ensure_input_allowed(hwnd)
-    _click_options(button, double)
-    with _lock, background_action(hwnd), uia.com_session():
-        wrapper = _find(hwnd, name, automation_id, scope=scope, target_id=runtime_id)
-        desc = uia.describe(wrapper, hwnd)
-        action = _activate(hwnd, wrapper)
-        return {"action": action, "element": desc, "backend": "pywinauto-uia", "scope": scope}
+    phase, outcome = "preflight", "not_started"
+    before = _window_state(hwnd)
+    try:
+        ensure_input_allowed(hwnd)
+        _click_options(button, double)
+        with _lock, background_action(hwnd), uia.com_session():
+            phase = "target_resolution"
+            wrapper = _find(hwnd, name, automation_id, scope=scope, target_id=runtime_id)
+            phase = "description"
+            desc = uia.describe(wrapper, hwnd)
+            phase, outcome = "activation", "unknown; inspect target before retrying"
+            action = _activate(hwnd, wrapper)
+            phase, outcome = "post_action", "completed; application state not verified"
+            result = {"action": action, "element": desc, "backend": "pywinauto-uia", "scope": scope}
+        after = _window_state(hwnd)
+        result.update(window_state_before=before, window_state_after=after,
+                      foreground_changed=(before["foreground_hwnd"] != after["foreground_hwnd"]
+                                          if None not in (before["foreground_hwnd"], after["foreground_hwnd"]) else None))
+        return result
+    except Exception as exc:
+        exc.phase = phase
+        exc.mutation_outcome = outcome
+        exc.window_state_before = before
+        exc.window_state_after = _window_state(hwnd)
+        raise
 
 
 def _type_into(hwnd, wrapper, text, replace=False):
@@ -229,12 +267,23 @@ def _type_into(hwnd, wrapper, text, replace=False):
         raise ValueError("target text control is read-only")
     desired = text if replace else value.CurrentValue + text
     rect = _interaction_rect(hwnd, wrapper)
-    if wrapper.element_info.control_type == "Edit":
-        wrapper.set_edit_text(desired)
-    else:
-        value.SetValue(desired)
-    if value.CurrentValue != desired:
-        raise RuntimeError("text was set but readback differs; inspect the target before retrying")
+    try:
+        if wrapper.element_info.control_type == "Edit":
+            wrapper.set_edit_text(desired)
+        else:
+            value.SetValue(desired)
+    except Exception as exc:
+        raise ActionFailure(exc, "write", "unknown; inspect target before retrying") from exc
+    try:
+        # Read only: never repeat the write, restore the window or select a replacement.
+        deadline = time.monotonic() + 0.3
+        while value.CurrentValue != desired:
+            if time.monotonic() >= deadline:
+                raise RuntimeError("text was set but readback differs; inspect the target before retrying; "
+                                   "a minimized provider may defer updates until the user restores it")
+            time.sleep(0.025)
+    except Exception as exc:
+        raise ActionFailure(exc, "readback", "write_returned; value_unverified; do not replay") from exc
     _remember(hwnd, wrapper)
     _show_interaction(hwnd, rect)
     return {"action": "replaced" if replace else "appended", "characters": len(text),

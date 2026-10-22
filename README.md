@@ -249,6 +249,8 @@ user application. Test journals use isolated temporary folders.
 Historical SendInput probes and the retired input guard are in
 [tests/legacy](tests/legacy/README.md), excluded from current discovery.
 See [docs/STATUS.md](docs/STATUS.md) for the verified migration scope.
+See [the 2026-10-22 issue review](docs/issue-review-20261022.md) for current
+diagnostic changes, provider limitations and unresolved foreground reports.
 
 ## App-specific testing
 
