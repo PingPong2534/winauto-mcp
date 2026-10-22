@@ -363,6 +363,14 @@ noise-floor note is a measurement from another process, not a universal threshol
 `foreground_steps(steps,reason,timeout_ms=3000,allow_takeover=False)` explicitly
 opts into temporary focus/cursor takeover and a human-input lock. Requires
 allow_takeover=True and a nonempty single-line reason, at most 120 characters.
+
+Action checks reserve 500 ms inside the original lease for cleanup. A cooperative
+timeout preserves partial mutations and reports release separately. Inspect
+`native_phase`, `failure_native_phase`, `cooperative_timeout`, `keys_released`,
+`mouse_buttons_released`, and `release_confirmed` before continuing.
+`utf16_units_dispatched` measures injection progress; read the actual value before
+retrying. Native activation/refocus refuses a nonresponsive or denied target;
+there is no unbounded UIA SetFocus fallback while human input is blocked.
 Use it for focus-dependent suggestion boxes, actual hover, missing scroll
 patterns or key navigation. It never runs implicitly from a background tool.
 
@@ -406,8 +414,10 @@ restoration fields. Runtime failures and watchdog exits return ok=false;
 confirmed steps are retained and an interrupted step can have unknown outcome.
 Inspect `mouse_buttons_released` and `keys_released`: normal cleanup releases
 tracked inputs before restoring cursor/focus. Watchdog cleanup attempts only
-their up events. A worker exit returns null unless a durable released report
-already confirmed key/button cleanup (`release_confirmed=true`).
+their up events. A worker exit returns null unless a durable cleanup checkpoint
+already acknowledged those key/button ups. Such acknowledgements can survive a
+restoration stall while `release_confirmed=false` still marks unconfirmed gate cleanup.
+Focus/cursor restoration always has its own separate acknowledgement.
 `worker_exit_phase` identifies initialization, activation, action or cleanup
 progress. Lost-focus diagnostics include HWND/PID/class without titles.
 `parent_timed_out=true` identifies a parent deadline; it returns the same

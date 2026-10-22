@@ -64,6 +64,8 @@ class InputGate:
         user.CallNextHookEx.restype = ctypes.c_ssize_t
         user.UnhookWindowsHookEx.argtypes = [wt.HANDLE]
         user.UnhookWindowsHookEx.restype = wt.BOOL
+        user.MsgWaitForMultipleObjectsEx.argtypes = [wt.DWORD, ctypes.c_void_p, wt.DWORD, wt.DWORD, wt.DWORD]
+        user.MsgWaitForMultipleObjectsEx.restype = wt.DWORD
         kernel = ctypes.WinDLL('kernel32', use_last_error=True)
         kernel.GetModuleHandleW.argtypes = [wt.LPCWSTR]
         kernel.GetModuleHandleW.restype = wt.HINSTANCE
@@ -94,7 +96,11 @@ class InputGate:
             while not self.stop.is_set() and not self.cancelled.is_set():
                 win32gui.PumpWaitingMessages()
                 self.last_pump = time.monotonic()
-                self.stop.wait(0.005)
+                # Wake immediately for each low-level hook callback. Polling via
+                # a short sleep adds a scheduler tick to every input event and
+                # can exhaust the lease halfway through ordinary Unicode text.
+                if user.MsgWaitForMultipleObjectsEx(0, None, 50, 0x04FF, 4) == 0xFFFFFFFF:
+                    raise ctypes.WinError(ctypes.get_last_error())
         except Exception as exc:
             self.error = str(exc)
         finally:

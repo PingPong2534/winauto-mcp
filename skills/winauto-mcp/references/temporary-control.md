@@ -114,7 +114,7 @@ allowed only as the last step; unlike `control_set`, capture is not required.
   They suppress human/foreign injected input and pass only the worker's tagged
   SendInput events. Gate failure prevents focus/input changes. Never automatically
   elevate or inject without the gate. This is not a secure desktop/device lock.
-- Activation tries SetForegroundWindow/native UIA SetFocus and verifies the
+- Activation probes responsiveness, tries native SetForegroundWindow once and verifies the
   actual foreground after a bounded WM_NULL acknowledgement (up to 200 ms).
   Lost-focus errors identify HWND/PID/class without titles. If neither works, abort. No Alt-key tricks, AttachThreadInput
   or changed system settings are used.
@@ -176,6 +176,22 @@ the returned capture to verify a transient list/tooltip that closes on focus
 release; a later screenshot cannot prove that earlier transient state. The
 foreground batch's final crop is evidence, not an automatic coordinate grant
 for later background actions; take a new capture after returning to UIA.
+
+## Timeout recovery
+
+Preflight and runtime action checks reserve 500 ms inside the original lease for
+cleanup. A short lease can still end with partial text. Inspect `failure_phase`,
+`failure_native_phase`, `cooperative_timeout`, `utf16_units_dispatched`,
+`keys_released`, `mouse_buttons_released`, `release_confirmed` and current app
+readback before doing anything else. Injected units do not prove applied text.
+Never automatically replay an append or submission.
+
+The worker wakes its input-hook pump on native messages, checks keyboard focus
+between small Unicode chunks and releases only its owned possible downs.
+Unknown async held keys still refuse control; release_keyboard remains a no-op.
+Native activation probes a target before requesting foreground. A denied or
+nonresponsive target stops without input. Restoration skips unresponsive previous
+windows and never runs unbounded UIA SetFocus while the gate is held.
 
 ## Click-drag
 

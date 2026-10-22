@@ -1,5 +1,8 @@
 # Issue review: 2026-10-22
 
+This is the initial review snapshot. See the later
+[foreground timeout follow-up](foreground-timeout-fixes-20261022.md) for #21/#23/#27.
+
 Baseline: clean master a94cfaf, matching origin/master. Reviewed all 13 open
 issues and their comments. No private application or account was accessed.
 

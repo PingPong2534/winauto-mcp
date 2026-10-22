@@ -658,6 +658,10 @@ def foreground_steps(steps: list[dict], reason: str, timeout_ms: int = 3000,
     removes its hooks. No hooks exist outside the short foreground batch.
     Lock/activation failure stops; no unlocked input or forced foreground hack.
     Check report.ok/completed_steps; interrupted step outcome can be unknown.
+    Action checks reserve 500 ms for cleanup inside the same lease. A cooperative
+    timeout keeps partial text and reports release separately; never replay it.
+    native_phase/failure_native_phase identify activation probe/request/ack or
+    typing; utf16_units_dispatched counts injected units, not verified text.
     Modifiers are distinct ctrl/shift/alt names held through pointer button-up.
     Keys use scan codes held for 20..500 ms; all tracked keys/buttons release on
     failure/cancellation. Successful delivery does not prove application response.
