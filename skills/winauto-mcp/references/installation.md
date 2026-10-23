@@ -15,6 +15,10 @@ complete-bundle targets; Claude Desktop/Cowork/cloud provisioning differs.
    dependencies, probe the real server, and install a native plugin containing
    skill and MCP configuration. Dependencies come from installation.json;
    do not invent unrelated plugins.
+   Extension mode also prepares Node.js/npm and the locked official Microsoft
+   runtime, registering the separate `playwright-extension` connector. Browser
+   extension installation and native tab approval remain separate interactive
+   steps; passive installer probes never connect to user tabs.
 4. Check exit status and the new `installation-result.json` in the state
    directory (default `%LOCALAPPDATA%\winauto-mcp`). Every selected client must
    have verified skill, MCP connector and enabled plugin. A failed component

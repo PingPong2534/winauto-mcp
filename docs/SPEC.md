@@ -51,7 +51,13 @@ release_control keeps attachment/state and only hides the decoration.
 Integrity refusal compares known target/server levels, unless the server has
 UIAccess. An unknown integrity level does not itself refuse an action.
 
-## 36 MCP tools
+## 45 MCP tools
+
+The original 36 desktop tools retain their contracts. Nine additional browser
+tools use a separate Playwright worker and owned persistent profiles; see
+[persistent browser contract](../skills/winauto-mcp/references/browser.md).
+Browser operations never acquire the desktop UIA lock or input gate. The server
+closes its owned contexts at shutdown while retaining their on-disk profiles.
 
 | Group | Tools | Contract |
 | --- | --- | --- |
@@ -217,6 +223,16 @@ or refusal; other covering windows still cause a refusal.
 exercise real Value/Invoke/Toggle/RangeValue/Scroll patterns under a cover,
 refusals, readback, script/journal behavior, worker COM and STA hosting. Real
 stdio tests initialize the server from a different directory and verify all
-36 tool names, including conditional UIA/Pillow/OpenCV guarded batches.
+45 tool names, including conditional UIA/Pillow/OpenCV guarded batches and the
+nine owned persistent-browser tools.
 Historical probes in `tests/legacy` are excluded and require
 the former backend revision.
+
+## Official Microsoft Extension connector
+
+The native plugin bundle also registers Microsoft's pinned `@playwright/mcp`
+0.0.83 as a separate `playwright-extension` server. Its 25 upstream tools attach
+to a user-approved existing Edge tab; they do not share the original WinAuto
+server's 45-tool session/ref/guard implementation. Native approval remains
+interactive and no token bypass is configured. See the
+[Extension contract](../skills/winauto-mcp/references/browser-extension.md).

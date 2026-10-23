@@ -23,6 +23,9 @@ class InstallationTests(unittest.TestCase):
             original = base / 'original'
             original.mkdir()
             shutil.copytree(ROOT / 'skills', original / 'skills')
+            cache = original / 'skills/winauto-mcp/scripts/__pycache__'
+            cache.mkdir(parents=True, exist_ok=True)
+            (cache / 'local-paths.pyc').write_bytes(b'local compiled artifact must not ship')
             shutil.copy2(ROOT / 'installation.json', original / 'installation.json')
             (original / 'requirements.txt').write_text('')
             relocated = base / 'relocated'
@@ -31,6 +34,8 @@ class InstallationTests(unittest.TestCase):
             _, first = installer.build_bundle(original, base / 'state', plan, 'python.exe')
             _, moved = installer.build_bundle(relocated, base / 'state', plan, 'python.exe')
             self.assertNotEqual(first, moved)
+            self.assertFalse(list((first / 'skills').rglob('*.pyc')))
+            self.assertFalse(list((moved / 'skills').rglob('__pycache__')))
             self.assertEqual(installer.read_json(moved / '.mcp.json')['mcpServers']['winauto']['args'],
                              [str(relocated / 'server.py')])
             foreign = [{'name': plan['marketplace'], 'source': 'directory', 'path': str(original)}]
@@ -65,6 +70,7 @@ class InstallationTests(unittest.TestCase):
                     mock.patch.object(installer, 'executable', return_value='test-client'), \
                     mock.patch.object(installer, 'command', return_value=''), \
                     mock.patch.object(installer, 'probe_server', return_value=sorted(installer.REQUIRED_TOOLS)), \
+                    mock.patch.object(installer, 'ensure_extension_runtime', return_value=None), \
                     mock.patch.object(installer, 'ensure_marketplace'), \
                     mock.patch.object(installer, 'ensure_plugin', side_effect=RuntimeError('missing dependency')) as plugin:
                 with self.assertRaisesRegex(RuntimeError, 'missing dependency'):
@@ -109,6 +115,9 @@ class InstallationTests(unittest.TestCase):
             for file in [*ROOT.glob('*.py'), ROOT / 'requirements.txt', ROOT / 'installation.json']:
                 shutil.copy2(file, repo / file.name)
             shutil.copytree(ROOT / 'skills', repo / 'skills')
+            (repo / 'browser-extension').mkdir()
+            for name in ('package.json', 'package-lock.json'):
+                shutil.copy2(ROOT / 'browser-extension' / name, repo / 'browser-extension' / name)
             helper = base / 'dependency/plugin'
             meta = {'name': 'winauto-test-helper', 'version': '1.0.0',
                     'description': 'Disposable installation prerequisite',
@@ -144,8 +153,10 @@ class InstallationTests(unittest.TestCase):
                 self.assertEqual(installer.main(args), 0)
                 first = installer.read_json(base / 'state/installation-result.json')
                 self.assertTrue(first['ok'])
+                self.assertEqual(first['browser_extension']['tool_count'], 25)
+                self.assertFalse(first['browser_extension']['browser_connection_verified'])
                 for client in installer.CLIENTS:
-                    self.assertEqual(first['clients'][client]['tool_count'], 36)
+                    self.assertEqual(first['clients'][client]['tool_count'], 45)
                     self.assertEqual(first['clients'][client]['required_plugins'], [dependency['id']])
                 # Source change must reach both native caches on reinstall.
                 ref = repo / 'skills/winauto-mcp/references/tools.md'

@@ -4,6 +4,20 @@ __pycache__/
 .location_cache.json
 @AutomationLog.txt
 
+# Authentication profiles must remain outside the checkout. Defense in depth.
+browser-profiles/
+playwright/.auth/
+browser-extension/node_modules/
+browser-extension/.playwright-mcp/
+.playwright-mcp/
+
+# Local real-account evidence and installer output can contain private data.
+docs/*-run.log
+docs/browser-live-verification.json
+docs/browser-extension-verification.json
+docs/app-guides-live-test.json
+guides/
+
 # Probe output: PNGs written by tests/probe_hover.py to be looked at once
 tests/_hover_probe/
 

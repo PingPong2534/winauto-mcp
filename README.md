@@ -22,13 +22,51 @@ The server uses MCP stdio with absolute paths to the venv's `python.exe` and
 `pywinauto>=0.6.9,<0.7`, with MCP SDK 2.x.
 
 For agents using this MCP, the repository includes the
-[WinAuto MCP skill](skills/winauto-mcp/SKILL.md), covering all 36 tools with
+[WinAuto MCP skill](skills/winauto-mcp/SKILL.md), covering all 45 tools with
 UIA targeting, efficient control sets, capture/cache/diff, journal and heap
 diagnostics, and verified recovery. See
 [skill installation](docs/skill-installation.md) for Codex installation and
 Claude Code. An install request always includes runtime, skill and connection.
 
+## Persistent browser control
+
+For an already authenticated Edge tab, the bundle also includes Microsoft's
+official Playwright Extension mode. The installer pins `@playwright/mcp` 0.0.83
+and registers a separate `playwright-extension` MCP server (25 upstream tools).
+Install the [official extension](https://github.com/microsoft/playwright/blob/main/packages/extension/README.md),
+then approve/select the intended tab through its normal connection page. It
+reuses the browser's existing session without copying cookies. No approval-bypass
+token is configured. See [Extension mode](skills/winauto-mcp/references/browser-extension.md).
+The 45-tool WinAuto server and its owned-profile mode below remain separate.
+
+The nine `browser_*` MCP tools use Playwright on a separate worker. Open a visible
+installed Edge/Chrome with a dedicated persistent profile, sign in manually once,
+and reuse that profile across browser and MCP restarts. Sites may expire sessions.
+Personal browser profiles are never attached or copied. No public debugging port,
+arbitrary JavaScript, forced actions or automatic publishing is exposed.
+
+Use `browser_open` -> `browser_snapshot` -> `browser_actions`. Actions use refs
+from that snapshot, verify form writes and report partial completion. File uploads
+use Playwright directly. `browser_close` retains the profile. See the complete
+[profile/login/action contract](skills/winauto-mcp/references/browser.md).
+
+`install.ps1` installs Playwright's Python package and driver. The default `msedge`
+route uses installed Microsoft Edge; it does not download another browser. Using
+`browser="chromium"` requires a separate `python -m playwright install chromium`.
+Profiles live outside the checkout under `%LOCALAPPDATA%/winauto-mcp/browser-profiles`.
+
+Run `tests/test_browser_integration.py` for an isolated local login fixture;
+`tests/probe_browser_session.py` opens a dedicated TikTok profile for manual login
+and read-only persistence/resume verification. Neither probe publishes content.
+
 ## Background control
+
+The skill maintains compact current guides per app/site from verified use,
+including relevant UI structure, semantic anchors, steps and recovery boundaries.
+It checks live state before reuse and invalidates/repairs contradicted recipes.
+Guides live under `%LOCALAPPDATA%/winauto-mcp/guides/v1`, outside Git and plugin
+caches, with one latest record per target and no history or user/session data.
+See [app/site guide learning](skills/winauto-mcp/references/app-guides.md).
 
 1. `list_windows()` and `attach_window(hwnd)` select the target and show a green
    client-area outline without raising the target or taking focus. The outline
@@ -224,7 +262,7 @@ the runner reports Unity as skipped and continues requested Edge probes. An
 all-skipped run returns status=skipped and passed=null, without starting MCP or
 installing Unity. The default smoke.py suite never launches Unity.
 
-The 36 tools also include cropped screenshots, pixel location/cache helpers,
+The 45 tools also include cropped screenshots, pixel location/cache helpers,
 element-presence waits, snapshots/diffs, scripted steps, journal replay,
 debug highlights and .NET heap snapshots. See [HOWTOUSE.md](HOWTOUSE.md) and
 [docs/SPEC.md](docs/SPEC.md) for contracts. Heap tools need `dotnet-gcdump` and

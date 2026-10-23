@@ -53,8 +53,19 @@ if (-not (Test-Path -LiteralPath $winautoPython)) {
     }
 }
 Invoke-WinAutoCommand $winautoPython @('-c', 'import sys; assert sys.version_info >= (3,10), "Python 3.10+ required"')
+Invoke-WinAutoCommand $winautoPython @('-m', 'pip', 'install', '--quiet', 'pip>=26.2.1')
 Invoke-WinAutoCommand $winautoPython @('-m', 'pip', 'install', '--quiet', '-r', (Join-Path $winautoRepo 'requirements.txt'))
 Invoke-WinAutoCommand $winautoPython @('-m', 'pip', 'check')
+
+$winautoPlan = Get-Content -Raw -LiteralPath (Join-Path $winautoRepo 'installation.json') | ConvertFrom-Json
+if ($winautoPlan.browser_extension.enabled) {
+    $winautoNode = Get-Command node -ErrorAction SilentlyContinue
+    if (-not $winautoNode) {
+        Install-WinAutoPackage 'OpenJS.NodeJS.LTS'
+        $winautoNodeFolder = Join-Path $env:ProgramFiles 'nodejs'
+        $env:PATH = "$winautoNodeFolder;$env:PATH"
+    }
+}
 
 if ($IncludeHeap) {
     $winautoDotnet = Get-Command dotnet -ErrorAction SilentlyContinue

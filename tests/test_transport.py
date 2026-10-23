@@ -25,7 +25,13 @@ class TransportTests(unittest.TestCase):
                     self.assertEqual(info.server_info.name, "winauto-mcp")
                     listing = await session.list_tools()
                     names = {tool.name for tool in listing.tools}
-                    self.assertEqual(len(names), 36)
+                    self.assertEqual(len(names), 45)
+                    self.assertTrue({'browser_open', 'browser_status', 'browser_snapshot',
+                                     'browser_actions', 'browser_close'} <= names)
+                    passive = await session.call_tool('browser_status', {})
+                    self.assertFalse(passive.is_error)
+                    state = json.loads(next(b.text for b in passive.content if b.type == 'text'))
+                    self.assertEqual(state['sessions'], [])
                     self.assertNotIn("wait_stable", names)
                     self.assertTrue({"read_element", "set_value", "run_steps", "control_set", "foreground_steps", "guarded_steps"} <= names)
                     guarded = next(tool for tool in listing.tools if tool.name == "guarded_steps")

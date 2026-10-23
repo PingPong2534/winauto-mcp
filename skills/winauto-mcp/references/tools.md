@@ -1,6 +1,6 @@
 # Tool reference
 
-This catalog covers all 36 tools in the hybrid UIA/temporary foreground backend. Names are unqualified MCP
+This catalog covers all 45 tools: 36 desktop tools and nine persistent browser tools. Names are unqualified MCP
 tool names; resolve the client's namespace. Signatures show defaults, not
 executable client functions. Omitted selectors default to `None`.
 Use current app observations for handles, IDs and coordinates.
@@ -487,3 +487,27 @@ held keys or manage the gate of an active foreground call.
 `release_keyboard(enable_blocking=True)` is a compatibility no-op returning
 that blocking is off. Either argument value leaves it off; it does not manage
 foreground_steps. That batch owns its lock and releases it before returning.
+
+## Persistent Playwright browsers
+
+Nine `browser_*` tools are independent of the UIA window attachment. Load
+[browser.md](browser.md) for profile ownership, login, refs and partial failures.
+
+| Tool | Signature |
+| --- | --- |
+| browser_status | `()` |
+| browser_open | `(profile="default", url="about:blank", browser="msedge")` |
+| browser_tabs | `(session_id)` |
+| browser_navigate | `(session_id, tab_id, url)` |
+| browser_snapshot | `(session_id, tab_id, limit=120)` |
+| browser_actions | `(session_id, tab_id, observation_id, steps, timeout_ms=10000)` |
+| browser_screenshot | `(session_id, tab_id)` |
+| browser_close | `(session_id)` |
+| browser_history | `()` |
+
+## Microsoft Extension connector
+
+The separate `playwright-extension` MCP server exposes Microsoft's upstream
+browser tools (25 in pinned version 0.0.83). They are not part of the 45-tool
+WinAuto server described above. Load [browser-extension.md](browser-extension.md)
+and inspect live schemas; names overlap but refs and ownership differ.

@@ -1,0 +1,9 @@
+{
+  "name": "winauto-microsoft-browser-extension",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Pinned Microsoft Playwright MCP extension transport for the WinAuto bundle",
+  "dependencies": {
+    "@playwright/mcp": "0.0.83"
+  }
+}

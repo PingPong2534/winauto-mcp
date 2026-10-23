@@ -2,6 +2,12 @@
   "name": "winauto-mcp",
   "version": "0.1.0",
   "marketplace": "winauto-local",
+  "browser_extension": {
+    "enabled": true,
+    "package": "@playwright/mcp",
+    "version": "0.0.83",
+    "browser": "msedge"
+  },
   "required_plugins": {
     "codex": [],
     "claude-code": []

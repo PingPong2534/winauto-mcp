@@ -109,7 +109,12 @@ mcp = MCPServer(
         "Use get_elements/read_element or a fresh screenshot to verify an action. "
         "history and replay_frame provide evidence; replay images are "
         "downscaled and must not be used for aiming. Reading an elevated "
-        "window is allowed, but writes to higher-integrity targets are refused."
+        "window is allowed, but writes to higher-integrity targets are refused. "
+        "The separate browser_* tools use owned, headed Playwright persistent profiles, "
+        "not desktop attachment or physical input. Use browser_open -> browser_snapshot "
+        "-> browser_actions with observed refs. Preserve login and accepted actions; "
+        "inspect completed_steps on failure. Login/OTP/CAPTCHA is manual. "
+        "Do not attach to personal browser profiles, extract credentials, or publish outside human scope."
     ),
 )
 _tool_lock = threading.RLock()
@@ -1479,5 +1484,12 @@ def replay_frame(seq: int, which: str = "after"):
     return [header, Image(data=data, format="jpeg")]
 
 
+import browser_tools
+browser_tools.register(mcp)
+
+
 if __name__ == "__main__":
-    mcp.run()
+    try:
+        mcp.run()
+    finally:
+        browser_tools.worker.shutdown()

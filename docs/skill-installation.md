@@ -65,6 +65,20 @@ script execution policy. The installer does not change system execution policy.
 
 ## Required plugins and feature dependencies
 
+The default `browser_extension` feature in `installation.json` also requires
+Node.js 20+ and npm. `install.ps1` prepares missing Node.js; the Python installer
+runs locked `npm ci --ignore-scripts` under `browser-extension/` and verifies
+Microsoft's `@playwright/mcp` 0.0.83. Both native clients receive a separate
+`playwright-extension` connector using `--extension --browser msedge --no-webmcp`.
+Passive stdio probes discover its 25 tools without connecting to user tabs.
+Preserve this checkout, `.venv` and `browser-extension/node_modules`; reinstall
+after moving it. No npm package is represented as an invented client plugin ID.
+
+Install the browser extension from Microsoft's official README link and keep
+native per-connection tab approval. The installer never copies cookies or sets
+`PLAYWRIGHT_MCP_EXTENSION_TOKEN`. Live browser verification is a separate opt-in
+test; see [Extension contract](../skills/winauto-mcp/references/browser-extension.md).
+
 `installation.json` declares `required_plugins` separately for Codex and Claude
 Code. There are currently **no external plugin dependencies** for the UIA
 backend. Python libraries are runtime dependencies and are always installed.
@@ -108,7 +122,7 @@ Example request:
 > "Customer name", inspect its text controls, replace the name with "Alice",
 > and return a crop of the textbox. Inspect the report before retrying a write.
 
-The skill covers all 36 tools with [the tool reference](../skills/winauto-mcp/references/tools.md)
+The skill covers all 45 tools with [the tool reference](../skills/winauto-mcp/references/tools.md)
 and [batch recovery](../skills/winauto-mcp/references/batches-and-diagnostics.md).
 
 ## Update, repair and diagnosis

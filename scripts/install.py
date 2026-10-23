@@ -13,7 +13,8 @@ from datetime import datetime, timezone
 
 ROOT = Path(__file__).resolve().parents[1]
 CLIENTS = ('codex', 'claude-code')
-REQUIRED_TOOLS = {'list_windows', 'attach_window', 'get_elements', 'read_element', 'control_set', 'foreground_steps', 'guarded_steps'}
+REQUIRED_TOOLS = {'list_windows', 'attach_window', 'get_elements', 'read_element', 'control_set', 'foreground_steps', 'guarded_steps',
+                  'browser_status', 'browser_open', 'browser_snapshot', 'browser_actions', 'browser_close'}
 
 
 def read_json(path):
@@ -61,6 +62,53 @@ def load_plan(path):
     return plan
 
 
+def extension_connector(repo, node=None):
+    node = node or shutil.which('node')
+    if not node:
+        raise RuntimeError('Node.js 20+ required for Microsoft Playwright Extension mode')
+    return {'command': str(Path(node).resolve()), 'args': [
+        str(Path(repo).resolve() / 'browser-extension/node_modules/@playwright/mcp/cli.js'),
+        '--extension', '--browser', 'msedge', '--no-webmcp',
+        '--timeout-action', '5000', '--timeout-navigation', '15000']}
+
+
+def ensure_extension_runtime(repo, plan, env):
+    config = plan.get('browser_extension', {})
+    if not config.get('enabled'):
+        return None
+    node = shutil.which('node')
+    npm = shutil.which('npm.cmd') or shutil.which('npm')
+    if not node or not npm:
+        raise RuntimeError('Node.js 20+ and npm required; rerun install.ps1 to prepare dependencies')
+    version = command([node, '--version'], env).strip()
+    if not re.fullmatch(r'v\d+\.\d+\.\d+', version) or int(version[1:].split('.')[0]) < 20:
+        raise RuntimeError('Node.js 20+ required for Microsoft Playwright Extension mode')
+    package = Path(repo) / 'browser-extension'
+    declared = read_json(package / 'package.json')['dependencies'].get('@playwright/mcp')
+    if config.get('package') != '@playwright/mcp' or declared != config.get('version'):
+        raise RuntimeError('Microsoft Playwright runtime must match the pinned installation plan')
+    if config.get('browser') != 'msedge':
+        raise RuntimeError('This extension connector supports Microsoft Edge only')
+    command([npm, 'ci', '--prefix', package, '--ignore-scripts', '--no-audit', '--no-fund'], env)
+    if read_json(package / 'node_modules/@playwright/mcp/package.json')['version'] != declared:
+        raise RuntimeError('Installed Microsoft Playwright MCP version differs from the lock')
+    return extension_connector(repo, node)
+
+
+async def probe_extension(connector):
+    """Handshake/tool discovery only; never connect to or change a browser."""
+    from mcp import ClientSession, StdioServerParameters
+    from mcp.client.stdio import stdio_client
+    params = StdioServerParameters(**connector)
+    async with stdio_client(params) as (reader, writer):
+        async with ClientSession(reader, writer, read_timeout_seconds=20) as session:
+            info = await session.initialize()
+            names = sorted(t.name for t in (await session.list_tools()).tools)
+            if 'playwright' not in info.server_info.name.lower() or not {'browser_snapshot','browser_tabs','browser_fill_form'} <= set(names):
+                raise RuntimeError('Microsoft extension MCP handshake/tool discovery failed')
+            return names
+
+
 async def probe_server(python, server):
     from mcp import ClientSession, StdioServerParameters
     from mcp.client.stdio import stdio_client
@@ -78,6 +126,9 @@ async def probe_server(python, server):
                 status = await session.call_tool('keyboard_status', {})
                 if status.is_error:
                     raise RuntimeError('Server status query failed')
+                browser = await session.call_tool('browser_status', {})
+                if browser.is_error or json.loads(next(x.text for x in browser.content if x.type == 'text'))['sessions']:
+                    raise RuntimeError('Passive browser status query failed')
                 return sorted(names)
 
 
@@ -90,6 +141,7 @@ def build_bundle(repo, state, plan, python):
     digest.update(json.dumps(plan, sort_keys=True).encode())
     digest.update(json.dumps({'repo': str(repo), 'python': str(Path(python).resolve())}).encode())
     files = sorted([*source.rglob('*'), *repo.glob('*.py'), repo / 'requirements.txt', repo / 'installation.json'])
+    files += [repo / 'browser-extension/package.json', repo / 'browser-extension/package-lock.json']
     for file in files:
         if file.is_file() and '__pycache__' not in file.parts:
             digest.update(file.relative_to(repo).as_posix().encode())
@@ -99,9 +151,10 @@ def build_bundle(repo, state, plan, python):
     market = state / 'marketplace'
     plugin = market / 'plugins' / plan['name'] / version
     skill = plugin / 'skills/winauto-mcp'
-    shutil.copytree(source, skill, dirs_exist_ok=True)
+    shutil.copytree(source, skill, dirs_exist_ok=True,
+                    ignore=shutil.ignore_patterns('__pycache__', '*.pyc', '*.pyo'))
     common = {'name': plan['name'], 'version': version,
-              'description': 'Windows UIA, guarded hybrid batches and bounded foreground control with all 36 tools.',
+              'description': 'Windows UIA, guarded foreground control and owned persistent Playwright browsers.',
               'author': {'name': 'winauto-mcp contributors'}}
     codex = dict(common, skills='./skills/', mcpServers='./.mcp.json',
                  interface={'displayName': 'WinAuto MCP',
@@ -111,8 +164,10 @@ def build_bundle(repo, state, plan, python):
         claude['dependencies'] = [dep['id'] for dep in plan['required_plugins']['claude-code']]
     write_json(plugin / '.codex-plugin/plugin.json', codex)
     write_json(plugin / '.claude-plugin/plugin.json', claude)
-    write_json(plugin / '.mcp.json', {'mcpServers': {'winauto': {
-        'command': str(Path(python).resolve()), 'args': [str(repo / 'server.py')]}}})
+    connectors = {'winauto': {'command': str(Path(python).resolve()), 'args': [str(repo / 'server.py')]}}
+    if plan.get('browser_extension', {}).get('enabled'):
+        connectors['playwright-extension'] = extension_connector(repo)
+    write_json(plugin / '.mcp.json', {'mcpServers': connectors})
     relative = './' + plugin.relative_to(market).as_posix()
     write_json(market / '.agents/plugins/marketplace.json', {
         'name': plan['marketplace'], 'plugins': [{
@@ -175,7 +230,7 @@ def ensure_plugin(client, cli, plugin_id, env):
 
 def verify_bundle(source, target):
     for file in (Path(source) / 'skills').rglob('*'):
-        if file.is_file():
+        if file.is_file() and '__pycache__' not in file.parts and file.suffix not in ('.pyc', '.pyo'):
             copy = Path(target) / file.relative_to(source)
             if not copy.is_file() or copy.read_bytes() != file.read_bytes():
                 raise RuntimeError(f'Installed skill is missing or stale: {copy}')
@@ -217,6 +272,12 @@ def main(argv=None):
         command([cli, 'plugin', 'list', '--help'], env)
         paths[client] = cli
     names = asyncio.run(probe_server(sys.executable, ROOT / 'server.py'))
+    extension = ensure_extension_runtime(ROOT, plan, env)
+    extension_names = asyncio.run(probe_extension(extension)) if extension else []
+    report['browser_extension'] = {'enabled': bool(extension), 'package_version': plan.get('browser_extension', {}).get('version'),
+                                   'tool_count': len(extension_names), 'tools': extension_names,
+                                   'connection_approval': 'interactive; no token bypass configured',
+                                   'browser_connection_verified': False}
     market, plugin = build_bundle(ROOT, state, plan, sys.executable)
     report.update(tools=names, phase='registering')
     write_json(state / 'installation-result.json', report)
@@ -245,6 +306,10 @@ def main(argv=None):
             connected = asyncio.run(probe_server(connector['command'], connector['args'][0]))
             if connected != names:
                 raise RuntimeError(f'{client} connector exposes a different tool set')
+            if extension:
+                ext = read_json(target / '.mcp.json')['mcpServers']['playwright-extension']
+                if asyncio.run(probe_extension(ext)) != extension_names:
+                    raise RuntimeError(f'{client} extension connector exposes a different tool set')
             report['clients'][client] = {'plugin': plan['name'] + '@' + plan['marketplace'],
                                          'installed_path': str(target), 'skill': True,
                                          'mcp_connector': True, 'enabled': True,
